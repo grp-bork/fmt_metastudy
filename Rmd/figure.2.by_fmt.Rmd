@@ -1,0 +1,2161 @@
+---
+title: 'Figure: FMT Ranking'
+author: "Sebastian Schmidt"
+date: "2021-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+options(stringsAsFactors = FALSE)
+```
+
+## Prepare Environment
+
+```{r Load Libraries, echo=F, warning=FALSE}
+library("tidyverse", warn.conflicts=F, quietly=T)
+library("cowplot", warn.conflicts=F, quietly=T)
+library("egg", warn.conflicts=F, quietly=T)
+```
+
+Set file names and basic parameters.
+
+```{r Set Parameters}
+#Preallocate global data structures
+PARAM <- list()
+
+#Set relevant folder names
+PARAM$folder.Rmd <- paste0(getwd(), "/")
+PARAM$folder.base <- gsub("Rmd/", "", PARAM$folder.Rmd)
+
+load(paste0(PARAM$folder.base, "data/param.analysis_transmission.Rdata"))
+```
+
+Load data.
+
+```{r}
+load(PARAM$file.sample)
+load(PARAM$file.phenotype)
+load(PARAM$file.data_transmission)
+load(PARAM$file.data_transmission.scored)
+load(PARAM$file.data_transmission.scored.consolidated)
+load(PARAM$file.mOTU)
+load(PARAM$file.mOTU.ANI)
+load(PARAM$file.tree)
+load(PARAM$file.beta_div)
+load(PARAM$file.allele_distances)
+load(PARAM$file.allele_diversity)
+load(PARAM$file.gmm_gmgc)
+load(PARAM$file.gmm_species)
+load(PARAM$file.gmm_gmgc_wide)
+load(PARAM$file.sample)
+```
+
+## Prepare Data.
+
+Precalculate and scale minimum seq depth per FMT.
+
+```{r}
+seq_depth.mean <- mean(data.sample$base_count, na.rm=T)
+seq_depth.sd <- sd(data.sample$base_count, na.rm=T)
+```
+
+Perform centered-log-ratio transform on mOTU relative abundances.
+
+```{r}
+data.mOTU.clr <- log2((data.mOTU.rel + 10^-6) / mean(data.mOTU.rel + 10^-6))
+data.mOTU.clr %>%
+  t() %>%
+  as_tibble(rownames = "sample") %>%
+  dplyr::select(c(sample, which(colnames(.) %in% use.species.engraftment))) -> data.mOTU.clr.by_sample
+```
+
+Compute average engraftment across all species (unweighted) observed in the post FMT sample. Append metadata and species abundances as additional variables.
+
+```{r}
+dat.transmission.scored %>%
+  #Drop problematic FMTs
+  filter(! (fmt.id %in% c("FMT_Vaughn.02", "FMT_Vaughn.07") & timepoint.fmt == 56)) %>%
+  filter(! (fmt.id %in% c("FAME.06b") & timepoint.fmt == 28)) %>%
+  #Drop autologous FMTs and non-scored FMTs
+  filter(! outcome %in% c("not observed", "autologous FMT")) %>%
+  #Subset to species of interest
+  filter(species %in% use.species.engraftment) %>%
+  filter(!species %in% drop.Collinsella) %>%
+  #Filter to sets where species was present in donor
+  filter(inc.post) %>%
+  #Subset to last scored timepoint
+  group_by(fmt.id) %>%
+  top_n(1, timepoint.fmt) %>%
+  ungroup() %>%
+  #Re-quantify level of engraftment, based on outcomes
+  #=> set engraftment to 0 if too few positions were scored
+  dplyr::mutate(
+    engraftment = case_when(
+      n.pos.scored < 100 ~ 0,
+      !inc.donor ~ 0,
+      outcome %in% c("rejection novel", "species retained") ~ 0,
+      TRUE ~ donor.specific
+    )
+  ) -> dat.transmission.fmt.full
+
+#Get summarized profiles, append metadata and profiles
+dat.transmission.fmt.full %>%
+  #Summarize data to get average engraftment for all species per FMT
+  group_by(fmt.id, timepoint.fmt, sample.donor, sample.pre, sample.post) %>%
+  dplyr::summarise(
+    n.species = n(),
+    engraftment.mean = mean(engraftment, na.rm=T),
+    #engraftment.frac = sum(outcome %in% c("engraftment novel", "engraftment conspecific", "coexistence")) / n()
+    engraftment.frac = sum(outcome %in% c("engraftment novel", "engraftment conspecific")) / n()
+  ) %>%
+  ungroup() %>%
+  ###########################
+  #Prepare the various variables to be tested later on
+  ###########################
+  #Technical variables
+  #=> minimum base depth among donor, pre and post FMT samples
+  left_join(data.sample %>% dplyr::select(sample_alias, base_count), by = c("sample.donor" = "sample_alias")) %>% dplyr::rename(depth.donor = base_count) %>%
+  left_join(data.sample %>% dplyr::select(sample_alias, base_count), by = c("sample.pre" = "sample_alias")) %>% dplyr::rename(depth.pre = base_count) %>%
+  left_join(data.sample %>% dplyr::select(sample_alias, base_count), by = c("sample.post" = "sample_alias")) %>% dplyr::rename(depth.post = base_count) %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate(min_depth = ifelse(is.na(depth.donor) & is.na(depth.pre) & is.na(depth.post), NA, min(depth.donor, depth.pre, depth.post, na.rm=T))) %>%
+  ungroup() %>%
+  dplyr::mutate(min_depth = (min_depth - seq_depth.mean) / seq_depth.sd) %>%
+  ###########################
+  #Clinical data
+   left_join(data.fmt %>% dplyr::select(fmt.id, study.full, indication, fmt.route, fmt.sample_prep, bowel.prep.summary, vancomycin, fidaxomycin, antibiotics.summary, clinical.response.summary), by = "fmt.id") %>%
+  mutate(
+    indication.esbl = ifelse(indication == "antibiotics_resistance", 1, 0),
+    indication.mets = ifelse(indication == "metabolic_syndrome", 1, 0),
+    indication.ibs = ifelse(indication == "irritable_bowel_syndrome", 1, 0),
+    indication.uc = ifelse(indication == "ulcerative_colitis", 1, 0),
+    indication.cd = ifelse(indication == "morbus_crohn", 1, 0),
+    indication.ibd = ifelse(indication %in% c("morbus_crohn", "ulcerative_colitis"), 1, 0),
+    indication.rcdi = ifelse(indication == "recurrent_c_diff", 1, 0),
+    indication.mel = ifelse(indication == "melanoma", 1, 0),
+    indication.ren = ifelse(indication == "renal_carcinoma", 1, 0),
+    indication.tou = ifelse(indication == "tourette_syndrome", 1, 0),
+    indication.ctr = ifelse(indication == "healthy_volunteer", 1, 0),
+    fmt_route.nasal = ifelse(fmt.route %in% c("nasoduodenal tube", "nasogastric tube", "colonoscopy and nasoduodenal tube"), 1, 0),
+    fmt_route.rectal = ifelse(fmt.route %in% c("colonoscopy", "colonoscopy and enema", "retention enema for 5d", "colonoscopy and nasoduodenal tube", "olonoscopy and oral capsule"), 1, 0),
+    fmt_sample_prep.fresh = ifelse(fmt.sample_prep == "fresh", 1, 0),
+    bowel_prep = ifelse(bowel.prep.summary, 1, 0),
+    abx_pre_fmt = ifelse(antibiotics.summary, 1, 0),
+    clinical_success = ifelse(clinical.response.summary == "responder", 1, 0)
+  ) %>%
+  distinct() %>%
+  ###########################
+  #Microbiome community-level factors
+  #=> donor richness
+  left_join(data.sample %>% dplyr::select(sample_alias, q.0) %>% dplyr::mutate(q.scaled = (q.0 - mean(q.0, na.rm=T)) / sd(q.0, na.rm=T)), by = c("sample.donor" = "sample_alias")) %>%
+  dplyr::rename(richness.donor = q.0, richness.donor.scaled = q.scaled) %>%
+  #=> richness pre-FMT
+  left_join(data.sample %>% dplyr::select(sample_alias, q.0) %>% dplyr::mutate(q.scaled = (q.0 - mean(q.0, na.rm=T)) / sd(q.0, na.rm=T)), by = c("sample.pre" = "sample_alias")) %>%
+  dplyr::rename(richness.pre = q.0, richness.pre.scaled = q.scaled) %>%
+  #=> richness post FMT
+  left_join(data.sample %>% dplyr::select(sample_alias, q.0) %>% dplyr::mutate(q.scaled = (q.0 - mean(q.0, na.rm=T)) / sd(q.0, na.rm=T)), by = c("sample.post" = "sample_alias")) %>%
+  dplyr::rename(richness.post = q.0, richness.post.scaled = q.scaled) %>%
+  #=> richness ratio
+  mutate(richness.ratio.donor_pre = log2(richness.donor / richness.pre)) %>%
+  mutate(richness.ratio.post_pre = log2(richness.post / richness.pre)) %>%
+  #=> donor functional redundancy
+  left_join(data.sample %>% dplyr::select(sample_alias, fr.ent) %>% dplyr::mutate(fr.scaled = (fr.ent - mean(fr.ent, na.rm=T)) / sd(fr.ent, na.rm=T)), by = c("sample.donor" = "sample_alias")) %>%
+  dplyr::rename(fr.donor = fr.ent, fr.donor.scaled = fr.scaled) %>%
+  #=> pre-FMT functional redundancy
+  left_join(data.sample %>% dplyr::select(sample_alias, fr.ent) %>% dplyr::mutate(fr.scaled = (fr.ent - mean(fr.ent, na.rm=T)) / sd(fr.ent, na.rm=T)), by = c("sample.pre" = "sample_alias")) %>%
+  dplyr::rename(fr.pre = fr.ent, fr.pre.scaled = fr.scaled) %>%
+  #=> post-FMT functional redundancy
+  left_join(data.sample %>% dplyr::select(sample_alias, fr.ent) %>% dplyr::mutate(fr.scaled = (fr.ent - mean(fr.ent, na.rm=T)) / sd(fr.ent, na.rm=T)), by = c("sample.post" = "sample_alias")) %>%
+  dplyr::rename(fr.post = fr.ent, fr.post.scaled = fr.scaled) %>%
+  #=> Bray-Curtis similarity donor-pre
+  mutate(dissimilarity.donor_pre = beta.div[["Bray_Curtis"]][cbind(sample.donor, sample.pre)]) %>%
+  #=> Bray-Curtis similarity post-pre (strength of overall shift)
+  mutate(dissimilarity.post_pre = beta.div[["Bray_Curtis"]][cbind(sample.post, sample.pre)]) %>%
+  ###########################
+  #GMM profiles
+  #=> summarised gmm profiles
+  left_join(dat.gmm.gmgc.summarised.wide %>% rename_with(~paste0(. , ".donor"))) %>%
+  left_join(dat.gmm.gmgc.summarised.wide %>% rename_with(~paste0(. , ".pre"))) %>%
+  left_join(dat.gmm.gmgc.summarised.wide %>% rename_with(~paste0(. , ".post"))) %>%
+  #=> gmm profiles normalised counts
+  left_join(dat.gmm.gmgc.summarised.wide.norm %>% rename_with(~paste0(. , ".donor")), by = "sample.donor", suffix = c("", ".norm")) %>%
+  left_join(dat.gmm.gmgc.summarised.wide.norm %>% rename_with(~paste0(. , ".pre")), by = "sample.pre", suffix = c("", ".norm")) %>%
+  left_join(dat.gmm.gmgc.summarised.wide.norm %>% rename_with(~paste0(. , ".post")), by = "sample.post", suffix = c("", ".norm")) %>%
+  #=> GMM-based "metabolic" distances between donor and recipient
+  mutate(dist_gmm.donor_pre = as.matrix(dist.gmm.gmgc)[cbind(sample.donor, sample.pre)]) %>%
+  #=> GMM-based "metabolic" distances between donor and recipient
+  mutate(dist_gmm.post_pre = as.matrix(dist.gmm.gmgc)[cbind(sample.post, sample.pre)]) %>%
+  ###########################
+  #=> add species abundances in donor
+  left_join(data.mOTU.clr.by_sample, by = c("sample.donor" = "sample")) %>%
+  #=> add species abundances in recipient pre-FMT
+  left_join(data.mOTU.clr.by_sample, by = c("sample.pre" = "sample"), suffix = c(".abd_donor", ".abd_pre")) -> dat.transmission.fmt.summarised
+```
+
+Get different orderings of `fmt.id`.
+
+```{r}
+#By mean engraftment
+dat.transmission.fmt.summarised %>% arrange(desc(engraftment.mean)) %>% pull(fmt.id) -> order.fmt.mean
+
+#By mean engraftment, within indications
+dat.transmission.fmt.summarised %>%
+  dplyr::mutate(indication = fct_relevel(
+    indication,
+    "recurrent_c_diff",
+    "ulcerative_colitis",
+    "morbus_crohn",
+    "irritable_bowel_syndrome",
+    "renal_carcinoma",
+    "melanoma",
+    "metabolic_syndrome",
+    "antibiotics_resistance",
+    "tourette_syndrome",
+    "healthy_volunteer"
+  )) %>%
+  arrange(indication, desc(engraftment.mean)) %>%
+  pull(fmt.id) -> order.fmt.ind_mean
+
+#By total engrafting species
+dat.transmission.fmt.full %>%
+  left_join(data.fmt %>% dplyr::select(fmt.id, indication)) %>%
+  dplyr::mutate(indication = fct_relevel(
+    indication,
+    "recurrent_c_diff",
+    "ulcerative_colitis",
+    "morbus_crohn",
+    "irritable_bowel_syndrome",
+    "renal_carcinoma",
+    "melanoma",
+    "metabolic_syndrome",
+    "antibiotics_resistance",
+    "tourette_syndrome",
+    "healthy_volunteer"
+  )) %>%
+  dplyr::select(fmt.id, indication, outcome) %>%
+  dplyr::mutate(
+    type = case_when(
+      outcome %in% c("engraftment novel", "engraftment conspecific") ~ "engraftment",
+      outcome %in% c("rejection novel", "rejection conspecific", "species retained") ~ "rejection",
+      outcome %in% c("influx novel", "influx conspecific", "novel unclear") ~ "influx",
+      TRUE ~ outcome
+    )
+  ) %>%
+  group_by(fmt.id, indication, type) %>%
+  tally() %>%
+  group_by(fmt.id, indication) %>%
+  #mutate(fraction = n / sum(n)) %>%
+  mutate(
+    fraction = n / sum(n)
+  ) %>%
+  ungroup() %>%
+  filter(type == "engraftment") -> tmp
+
+tmp %>% arrange(indication, desc(n)) %>% pull(fmt.id) -> order.fmt.ind_sp_total
+tmp %>% arrange(indication, desc(fraction)) %>% pull(fmt.id) -> order.fmt.ind_sp_frac
+tmp %>% arrange(fraction) %>% pull(fmt.id) -> order.fmt.sp_frac
+```
+
+A different take on the data: compute resilience and invasion indices, update data as before.
+
+```{r}
+dat.transmission.scored %>%
+  #Drop problematic FMTs
+  #filter(! fmt.id %in% drop.fmt.id) %>%
+  filter(! (fmt.id %in% c("FMT_Vaughn.02", "FMT_Vaughn.07") & timepoint.fmt == 56)) %>%
+  filter(! (fmt.id %in% c("FAME.06b") & timepoint.fmt == 28)) %>%
+  #Drop autologous FMTs and non-scored FMTs
+  filter(! outcome %in% c("not observed")) %>%
+  filter(inc.donor | inc.pre | inc.post) %>%
+  #Subset to species of interest
+  #filter(species %in% use.species.engraftment) %>%
+  filter(!species %in% drop.Collinsella) %>%
+  #Subset to last scored timepoint
+  group_by(fmt.id) %>%
+  top_n(1, timepoint.fmt) %>%
+  ungroup() %>%
+  #Subset to relevant set of species
+  #=> observed in >=50 pre-post pairs
+  group_by(species) %>%
+  filter(n() >= 20) %>%
+  ungroup() %>%
+  #Calculate resilience index per FMT
+  dplyr::mutate(
+    frac.rec = case_when(
+      !inc.pre ~ 0,
+      outcome %in% c("species lost", "engraftment novel", "novel unclear", "influx novel") ~ 0,
+      outcome == "autologous FMT" ~ recipient.specific,
+      TRUE ~ recipient.specific
+    ),
+    frac.don = case_when(
+      !inc.donor ~ 0,
+      outcome %in% c("species lost", "species retained", "rejection novel", "influx novel") ~ 0,
+      TRUE ~ donor.specific
+    ),
+    frac.coexist = case_when(
+      !inc.pre ~ 0,
+      !inc.donor ~ 0,
+      !inc.post ~ 0,
+      outcome %in% c("species lost", "species retained", "rejection novel", "engraftment novel", "influx novel", "novel unclear", "autologous FMT") ~ 0,
+      TRUE ~ donor.specific + recipient.specific
+    ),
+    sp_retained = case_when(
+      outcome == "species retained" ~ recipient.specific,
+      outcome == "autologous FMT" & inc.pre ~ recipient.specific,
+      TRUE ~ 0
+    ),
+    reject_consp = ifelse(outcome == "rejection conspecific", recipient.specific, 0),
+    #reject_consp = ifelse(outcome %in% c("rejection conspecific", "engraftment conspecific", "coexistence", "influx conspecific"), recipient.specific, 0),
+    coexist_consp.rec = ifelse(outcome %in% c("coexistence", "engraftment conspecific", "influx conspecific"), recipient.specific, 0),
+    coexist_consp.donor = ifelse(outcome %in% c("coexistence", "rejection conspecific", "influx conspecific"), donor.specific, 0),
+    engraft_consp = ifelse(outcome == "engraftment conspecific", donor.specific, 0),
+    #engraft_consp = ifelse(outcome %in% c("rejection conspecific", "engraftment conspecific", "coexistence", "influx conspecific"), donor.specific, 0),
+    reject_novel = ifelse(outcome == "rejection novel", 1, 0),
+    engraft_novel = ifelse(outcome %in% c("engraftment novel", "novel unclear"), donor.specific, 0),
+    sp_lost = case_when(
+      outcome == "species lost" ~ 1,
+      outcome == "autologous FMT" & inc.pre & !inc.post ~ 1,
+      TRUE ~ 0
+    ),
+    influx_consp = case_when(
+      outcome == "species retained" ~ 1 - recipient.specific,
+      outcome == "autologous FMT" & inc.pre & inc.post ~ 1 - recipient.specific,
+      outcome == "autologous FMT" & !inc.pre & inc.post ~ 1,
+      outcome == "autologous FMT" & inc.pre & !inc.post ~ 0,
+      outcome %in% c("rejection conspecific", "engraftment conspecific", "coexistence", "influx conspecific") ~ 1 - recipient.specific - donor.specific,
+      outcome == "species lost" ~ 0,
+      TRUE ~ 0
+    ),
+    influx_novel = case_when(
+      outcome == "influx novel" ~ 1,
+      outcome %in% c("novel unclear", "engraftment novel") ~ 1 - donor.specific,
+      TRUE ~ 0
+    ),
+    influx_total = influx_consp + influx_novel,
+  ) %>%
+  #Summarize across FMTs
+  group_by(fmt.id, fmt.type, timepoint.fmt, sample.donor, sample.pre, sample.post) %>%
+  dplyr::summarise(
+    n.sp = n(),
+    n.sp.donor = sum(inc.donor),
+    n.sp.pre = sum(inc.pre),
+    n.sp.post = sum(inc.post),
+    n.sp.donor_post = sum(inc.donor | inc.post),
+    n.sp.pre_post = sum(inc.pre | inc.post),
+    persistence.index = sum(frac.rec) / sum(inc.post),
+    resilience.index = sum(frac.rec) / sum(inc.pre),
+    engraftment.index = sum(frac.don) / sum(inc.post),
+    invasiveness.index = sum(frac.don) / sum(inc.donor),
+    coexistence.index = sum(frac.coexist) / sum(inc.post),
+    sp_retained = sum(sp_retained),
+    reject_consp = sum(reject_consp),
+    coexist_consp.rec = sum(coexist_consp.rec),
+    coexist_consp.donor = sum(coexist_consp.donor),
+    engraft_consp = sum(engraft_consp),
+    reject_novel = sum(reject_novel),
+    engraft_novel = sum(engraft_novel),
+    sp_lost = sum(sp_lost),
+    influx_consp = sum(influx_consp),
+    influx_novel = sum(influx_novel),
+    influx = sum(influx_total)
+  ) %>%
+  ###########################
+  #Prepare the various variables to be tested later on
+  ###########################
+  #Technical variables
+  #=> minimum base depth among donor, pre and post FMT samples
+  left_join(data.sample %>% dplyr::select(sample_alias, base_count), by = c("sample.donor" = "sample_alias")) %>% dplyr::rename(depth.donor = base_count) %>%
+  left_join(data.sample %>% dplyr::select(sample_alias, base_count), by = c("sample.pre" = "sample_alias")) %>% dplyr::rename(depth.pre = base_count) %>%
+  left_join(data.sample %>% dplyr::select(sample_alias, base_count), by = c("sample.post" = "sample_alias")) %>% dplyr::rename(depth.post = base_count) %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate(min_depth = ifelse(is.na(depth.donor) & is.na(depth.pre) & is.na(depth.post), NA, min(depth.donor, depth.pre, depth.post, na.rm=T))) %>%
+  ungroup() %>%
+  dplyr::mutate(min_depth = (min_depth - seq_depth.mean) / seq_depth.sd) %>%
+  ###########################
+  #Clinical data
+   left_join(data.fmt %>% dplyr::select(fmt.id, study.full, indication, fmt.route, fmt.sample_prep, bowel.prep.summary, vancomycin, fidaxomycin, antibiotics.summary, clinical.response.summary), by = "fmt.id") %>%
+  mutate(
+    indication.esbl = ifelse(indication == "antibiotics_resistance", 1, 0),
+    indication.mets = ifelse(indication == "metabolic_syndrome", 1, 0),
+    indication.ibs = ifelse(indication == "irritable_bowel_syndrome", 1, 0),
+    indication.uc = ifelse(indication == "ulcerative_colitis", 1, 0),
+    indication.cd = ifelse(indication == "morbus_crohn", 1, 0),
+    indication.ibd = ifelse(indication %in% c("morbus_crohn", "ulcerative_colitis"), 1, 0),
+    indication.rcdi = ifelse(indication == "recurrent_c_diff", 1, 0),
+    indication.mel = ifelse(indication == "melanoma", 1, 0),
+    indication.ren = ifelse(indication == "renal_carcinoma", 1, 0),
+    indication.tou = ifelse(indication == "tourette_syndrome", 1, 0),
+    indication.ctr = ifelse(indication == "healthy_volunteer", 1, 0),
+    fmt_route.nasal = ifelse(fmt.route %in% c("nasoduodenal tube", "nasogastric tube", "colonoscopy and nasoduodenal tube"), 1, 0),
+    fmt_route.rectal = ifelse(fmt.route %in% c("colonoscopy", "colonoscopy and enema", "retention enema for 5d", "colonoscopy and nasoduodenal tube", "olonoscopy and oral capsule"), 1, 0),
+    fmt_sample_prep.fresh = ifelse(fmt.sample_prep == "fresh", 1, 0),
+    bowel_prep = ifelse(bowel.prep.summary, 1, 0),
+    abx_pre_fmt = ifelse(antibiotics.summary, 1, 0),
+    clinical_success = ifelse(clinical.response.summary == "responder", 1, 0)
+  ) %>%
+  distinct() %>%
+  ###########################
+  #Microbiome community-level factors
+  #=> donor richness
+  left_join(data.sample %>% dplyr::select(sample_alias, q.0) %>% dplyr::mutate(q.scaled = (q.0 - mean(q.0, na.rm=T)) / sd(q.0, na.rm=T)), by = c("sample.donor" = "sample_alias")) %>%
+  dplyr::rename(richness.donor = q.0, richness.donor.scaled = q.scaled) %>%
+  #=> richness pre-FMT
+  left_join(data.sample %>% dplyr::select(sample_alias, q.0) %>% dplyr::mutate(q.scaled = (q.0 - mean(q.0, na.rm=T)) / sd(q.0, na.rm=T)), by = c("sample.pre" = "sample_alias")) %>%
+  dplyr::rename(richness.pre = q.0, richness.pre.scaled = q.scaled) %>%
+  #=> richness post FMT
+  left_join(data.sample %>% dplyr::select(sample_alias, q.0) %>% dplyr::mutate(q.scaled = (q.0 - mean(q.0, na.rm=T)) / sd(q.0, na.rm=T)), by = c("sample.post" = "sample_alias")) %>%
+  dplyr::rename(richness.post = q.0, richness.post.scaled = q.scaled) %>%
+  #=> richness ratio
+  mutate(richness.ratio.donor_pre = log2(richness.donor / richness.pre)) %>%
+  mutate(richness.ratio.post_pre = log2(richness.post / richness.pre)) %>%
+  #=> donor functional redundancy
+  left_join(data.sample %>% dplyr::select(sample_alias, fr.ent) %>% dplyr::mutate(fr.scaled = (fr.ent - mean(fr.ent, na.rm=T)) / sd(fr.ent, na.rm=T)), by = c("sample.donor" = "sample_alias")) %>%
+  dplyr::rename(fr.donor = fr.ent, fr.donor.scaled = fr.scaled) %>%
+  #=> donor functional redundancy
+  left_join(data.sample %>% dplyr::select(sample_alias, fr.ent) %>% dplyr::mutate(fr.scaled = (fr.ent - mean(fr.ent, na.rm=T)) / sd(fr.ent, na.rm=T)), by = c("sample.pre" = "sample_alias")) %>%
+  dplyr::rename(fr.pre = fr.ent, fr.pre.scaled = fr.scaled) %>%
+  #=> post-FMT functional redundancy
+  left_join(data.sample %>% dplyr::select(sample_alias, fr.ent) %>% dplyr::mutate(fr.scaled = (fr.ent - mean(fr.ent, na.rm=T)) / sd(fr.ent, na.rm=T)), by = c("sample.post" = "sample_alias")) %>%
+  dplyr::rename(fr.post = fr.ent, fr.post.scaled = fr.scaled) %>%
+  #=> Bray-Curtis similarity donor-pre
+  mutate(dissimilarity.donor_pre = beta.div[["Bray_Curtis"]][cbind(sample.donor, sample.pre)]) %>%
+  #=> Bray-Curtis similarity post-pre (strength of overall shift)
+  mutate(dissimilarity.post_pre = beta.div[["Bray_Curtis"]][cbind(sample.post, sample.pre)]) %>%
+  #=> Bray-Curtis similarity donor-post
+  mutate(dissimilarity.donor_post = beta.div[["Bray_Curtis"]][cbind(sample.post, sample.donor)]) %>%
+  ###########################
+  #GMM profiles
+  #=> summarised gmm profiles
+  left_join(dat.gmm.gmgc.summarised.wide %>% rename_with(~paste0(. , ".donor"))) %>%
+  left_join(dat.gmm.gmgc.summarised.wide %>% rename_with(~paste0(. , ".pre"))) %>%
+  left_join(dat.gmm.gmgc.summarised.wide %>% rename_with(~paste0(. , ".post"))) %>%
+  #=> gmm profiles normalised counts
+  left_join(dat.gmm.gmgc.summarised.wide.norm %>% rename_with(~paste0(. , ".donor")), by = "sample.donor", suffix = c("", ".norm")) %>%
+  left_join(dat.gmm.gmgc.summarised.wide.norm %>% rename_with(~paste0(. , ".pre")), by = "sample.pre", suffix = c("", ".norm")) %>%
+  left_join(dat.gmm.gmgc.summarised.wide.norm %>% rename_with(~paste0(. , ".post")), by = "sample.post", suffix = c("", ".norm")) %>%
+  #=> ratios of GMM counts post vs pre
+  dplyr::mutate(
+    acetate_production.ratio.post_pre = log2(acetate_production.post.norm / acetate_production.pre.norm),
+    propionate_production.ratio.post_pre = log2(propionate_production.post.norm / propionate_production.pre.norm),
+    butyrate_production.ratio.post_pre = log2(butyrate_production.post.norm / butyrate_production.pre.norm),
+    mucin_degradation.ratio.post_pre = log2(mucin_degradation.post.norm / mucin_degradation.pre.norm),
+    proteolysis.ratio.post_pre = log2(proteolysis.post.norm / proteolysis.pre.norm),
+    saccharolysis.ratio.post_pre = log2(saccharolysis.post.norm / saccharolysis.pre.norm),
+    lipolysis.ratio.post_pre = log2(lipolysis.post.norm / lipolysis.pre.norm)
+  ) %>%
+  #=> GMM-based "metabolic" distances between donor and recipient
+  mutate(dist_gmm.donor_pre = as.matrix(dist.gmm.gmgc)[cbind(sample.donor, sample.pre)]) %>%
+  #=> GMM-based "metabolic" distances between donor and recipient
+  mutate(dist_gmm.post_pre = as.matrix(dist.gmm.gmgc)[cbind(sample.post, sample.pre)]) %>%
+  ###########################
+  #=> add species abundances in donor
+  left_join(data.mOTU.clr.by_sample, by = c("sample.donor" = "sample")) %>%
+  #=> add species abundances in recipient pre-FMT
+  left_join(data.mOTU.clr.by_sample, by = c("sample.pre" = "sample"), suffix = c("", ".abd_pre")) %>%
+  #=> add species abundances in recipient pre-FMT
+  left_join(data.mOTU.clr.by_sample, by = c("sample.post" = "sample"), suffix = c(".abd_donor", ".abd_post")) -> dat.transmission.rescored
+```
+
+```{r, fig.width=8, fig.height=8}
+dat.transmission.scored.outcome %>%
+  #Drop problematic FMTs
+  #filter(! fmt.id %in% drop.fmt.id) %>%
+  filter(! (fmt.id %in% c("FMT_Vaughn.02", "FMT_Vaughn.07") & timepoint.fmt == 56)) %>%
+  filter(! (fmt.id %in% c("FAME.06b") & timepoint.fmt == 28)) %>%
+  #Drop autologous FMTs and non-scored FMTs
+  filter(! outcome %in% c("not observed", "novel unknown")) %>%
+  filter(inc.donor | inc.pre | inc.post) %>%
+  #Subset to species of interest
+  filter(species %in% use.species.engraftment) %>%
+  filter(!species %in% drop.Collinsella) %>%
+  #Select relevant columns
+  select(species:timepoint.fmt, outcome) %>%
+  mutate(
+    outcome.summarised = case_when(
+      outcome %in% c("influx novel", "influx conspecific") ~ "influx",
+      outcome %in% c("species retained", "rejection conspecific") ~ "persistence",
+      outcome %in% c("engraftment conspecific", "engraftment novel") ~ "colonisation",
+      TRUE ~ outcome
+    )
+  ) %>%
+  select(-outcome) %>%
+  group_by(species, fmt.id) %>%
+  filter(n() > 1) %>%
+  ungroup() -> tmp.dat
+
+tmp.dat %>%
+  left_join(tmp.dat %>% group_by(species, fmt.id) %>% top_n(1, timepoint.fmt) %>% ungroup(), by = c("species", "fmt.id", "fmt.type")) %>%
+  #Check if outcome changes relative to final timepoint
+  mutate(
+    delta_t = timepoint.fmt.y - timepoint.fmt.x,
+    outcome_change = as.numeric(outcome.summarised.x != outcome.summarised.y),
+    outcome_change_type = ifelse(
+      outcome_change == 1,
+      paste(outcome.summarised.x, outcome.summarised.y, sep = "_"),
+      NA
+    )
+  ) -> tmp.dat.scored
+
+tmp.dat.scored %>%
+  filter(delta_t > 0) %>%
+  group_by(fmt.id, fmt.type, delta_t) %>%
+  summarise(
+    n_species = n(),
+    rel_change = sum(outcome_change) / n()
+  ) %>%
+  filter(n_species >= 100) %>%
+  left_join(data.fmt %>% select(fmt.id, indication, study.full)) %>%
+  #mutate(delta_t = 0 - delta_t) %>%
+  ggplot(aes(x = delta_t, y = rel_change, size = n_species, group = fmt.id, colour = fmt.type)) +
+    geom_line(size = 0.5) +
+    geom_point() +
+    scale_x_sqrt() +
+    facet_wrap(. ~ indication) +
+    theme_minimal()
+
+```
+
+```{r, fig.width=8, fig.height=8}
+dat.transmission.scored.outcome %>%
+  #Drop problematic FMTs
+  filter(! (fmt.id %in% c("FMT_Vaughn.02", "FMT_Vaughn.07") & timepoint.fmt == 56)) %>%
+  filter(! (fmt.id %in% c("FAME.06b") & timepoint.fmt == 28)) %>%
+  #Drop autologous FMTs and non-scored FMTs
+  filter(! outcome %in% c("not observed", "novel unknown")) %>%
+  filter(inc.donor | inc.pre | inc.post) %>%
+  #Subset to species of interest
+  filter(species %in% use.species.engraftment) %>%
+  filter(!species %in% drop.Collinsella) %>%
+  #Select relevant columns
+  select(species:timepoint.fmt, sp_retained:influx_total) %>%
+  mutate(
+    recipient = sp_retained + coexist_consp.rec + reject_consp,
+    donor = engraft_novel + coexist_consp.donor + engraft_consp,
+    influx = influx_total
+  ) %>%
+  select(species:timepoint.fmt, recipient, donor, influx, sp_lost, reject_novel) %>%
+  group_by(species, fmt.id) %>%
+  filter(n() > 1) %>%
+  ungroup() -> tmp.dat
+
+tmp.dat %>%
+  left_join(tmp.dat %>% group_by(species, fmt.id) %>% top_n(1, timepoint.fmt) %>% ungroup(), by = c("species", "fmt.id", "fmt.type")) %>%
+  mutate(
+    delta_t = timepoint.fmt.y - timepoint.fmt.x,
+    dist = sqrt(
+      (recipient.x - recipient.y)^2 + (donor.x - donor.y)^2 + (influx.x - influx.y)^2 + (sp_lost.x - sp_lost.y)^2 + (reject_novel.x - reject_novel.y)^2
+    ) / 5
+  ) %>%
+  filter(delta_t > 0) -> tmp.dat.scored
+
+tmp.dat.scored %>%
+  filter(timepoint.fmt.x > 14) %>%
+  group_by(fmt.id, fmt.type, delta_t) %>%
+  summarise(
+    n_species = n(),
+    rel_change = mean(dist)
+  ) %>%
+  filter(n_species >= 100) %>%
+  left_join(data.fmt %>% select(fmt.id, indication, study.full)) -> tmp.dat.scored.summarised
+
+tmp.dat.scored.summarised %>%
+  mutate(
+    change_per_d = rel_change / delta_t
+  ) %>%
+  group_by(indication) %>%
+  summarise(
+    mu_tot = 100 * mean(rel_change),
+    sd_tot = 100 * sd(rel_change),
+    mu_pd = 100 * mean(change_per_d),
+    sd_pd = 100 * sd(change_per_d)
+  )
+
+tmp.dat.scored %>%
+  filter(delta_t > 0) %>%
+  filter(timepoint.fmt.x > 14) %>%
+  group_by(fmt.id, fmt.type, delta_t) %>%
+  summarise(
+    n_species = n(),
+    rel_change = mean(dist)
+  ) %>%
+  filter(n_species >= 100) %>%
+  left_join(data.fmt %>% select(fmt.id, indication, study.full)) %>%
+  #mutate(delta_t = 0 - delta_t) %>%
+  ggplot(aes(x = delta_t, y = rel_change, size = n_species, group = fmt.id, colour = fmt.type)) +
+    geom_line(size = 0.5) +
+    geom_point() +
+    geom_smooth(method = "lm", aes(group = indication), se = FALSE) +
+    scale_x_sqrt() +
+    facet_wrap(. ~ indication) +
+    theme_minimal()
+```
+
+
+
+Get baselines from autologous FMTs.
+
+```{r}
+dat.transmission.rescored %>%
+  filter(fmt.type == "placebo") %>%
+  dplyr::summarise(
+    sp_retained.by_pre = mean(sp_retained / n.sp.pre),
+    sp_lost.by_pre = mean(sp_lost / n.sp.pre),
+    influx.by_pre = mean(influx / n.sp.pre),
+    sp_retained.by_post = mean(sp_retained / n.sp.post),
+    sp_lost.by_post = mean(sp_lost / n.sp.post),
+    influx.by_post = mean(influx / n.sp.post),
+    sp_retained.by_pre_post = mean(sp_retained / n.sp.pre_post),
+    sp_lost.by_pre_post = mean(sp_lost / n.sp.pre_post),
+    influx.by_pre_post = mean(influx / n.sp.pre_post),
+    persistence.index = mean(persistence.index),
+    resilience.index = mean(resilience.index),
+    engraftment.index = mean(engraftment.index),
+    invasiveness.index = mean(invasiveness.index),
+    coexistence.index = mean(coexistence.index)
+  ) -> dat.transmission.baseline.placebo
+```
+
+Get FMT orderings based on computed indices.
+
+```{r}
+dat.transmission.rescored %>%
+  filter(!sample.post == "SAMEA7082346") %>%
+  filter(fmt.type != "placebo") %>%
+  arrange(persistence.index) %>%
+  pull(fmt.id) -> order.fmt.persistence
+
+dat.transmission.rescored %>%
+  filter(!sample.post == "SAMEA7082346") %>%
+  filter(fmt.type != "placebo") %>%
+  arrange(resilience.index) %>%
+  pull(fmt.id) -> order.fmt.resilience
+
+dat.transmission.rescored %>%
+  filter(!sample.post == "SAMEA7082346") %>%
+  filter(fmt.type != "placebo") %>%
+  arrange(engraftment.index) %>%
+  pull(fmt.id) -> order.fmt.engraftment
+
+dat.transmission.rescored %>%
+  filter(!sample.post == "SAMEA7082346") %>%
+  filter(fmt.type != "placebo") %>%
+  arrange(invasiveness.index) %>%
+  pull(fmt.id) -> order.fmt.invasiveness
+
+dat.transmission.rescored %>%
+  filter(!sample.post == "SAMEA7082346") %>%
+  filter(fmt.type != "placebo") %>%
+  arrange(coexistence.index) %>%
+  pull(fmt.id) -> order.fmt.coexistence
+```
+
+## Run LASSO Model to Predict Overall FMT Outcome
+
+Predefine variables of interest.
+
+```{r}
+#Define variables
+variables.metabolism.pre <- c(
+  "proteolysis.pre",
+  "saccharolysis.pre",
+  "lipolysis.pre",
+  "mucin_degradation.pre",
+  "propionate_production.pre",
+  "butyrate_production.pre"
+)
+
+variables.metabolism.donor <- c(
+  "proteolysis.donor",
+  "saccharolysis.donor",
+  "lipolysis.donor",
+  "mucin_degradation.donor",
+  "propionate_production.donor",
+  "butyrate_production.donor"
+)
+
+variables.metabolism.post <- c(
+  "proteolysis.ratio.post_pre",
+  "saccharolysis.ratio.post_pre",
+  "lipolysis.ratio.post_pre",
+  "mucin_degradation.ratio.post_pre",
+  "propionate_production.ratio.post_pre",
+  "butyrate_production.ratio.post_pre"
+)
+
+#Prep engraftment data
+dat.transmission.scored.engraftment %>%
+  filter(!sample.post == "SAMEA7082346") %>%
+  group_by(fmt.id) %>% top_n(1, timepoint.fmt) %>% ungroup() %>%
+  filter(species %in% use.species.engraftment.gt_50) %>%
+  dplyr::select(fmt.id, species, engraftment) %>%
+  dplyr::mutate(species = str_c(species, ".engraft")) %>%
+  tidyr::pivot_wider(names_from = species, values_from = engraftment, values_fill = 0) -> dat.engraft.wide
+
+#Set variable types
+var_lasso <- list(
+  "a_priori.technical" = c("min_depth", "indication.rcdi", "indication.uc", "indication.cd", "indication.ibs", "indication.esbl", "indication.mets", "indication.mel", "indication.ren", "indication.tou", "indication.ctr", "fmt_sample_prep.fresh", "fmt_route.nasal", "antibiotics.summary", "bowel.prep.summary", "timepoint.fmt"),
+  "a_priori.community.tax" = c("richness.donor.scaled", "richness.pre.scaled", "fr.donor.scaled", "fr.pre.scaled", "dissimilarity.donor_pre"),
+  "a_priori.community.metabolic" = c("dist_gmm.donor_pre", variables.metabolism.pre, variables.metabolism.donor),
+  "a_priori.abd.donor" = dat.transmission.rescored %>% dplyr::select(ends_with("abd_donor")) %>% names(),
+  "a_priori.abd.pre" = dat.transmission.rescored %>% dplyr::select(ends_with("abd_pre")) %>% names(),
+  "post_hoc.community.tax" = c("richness.post.scaled", "richness.ratio.post_pre", "fr.post.scaled", "dissimilarity.post_pre"),
+  "post_hoc.community.metabolic" = c("dist_gmm.post_pre", variables.metabolism.post),
+  "post_hoc.abd.post" = dat.transmission.rescored %>% dplyr::select(ends_with("abd_post")) %>% names(),
+  "post_hoc.engraftment" = dat.engraft.wide %>% dplyr::select(-fmt.id) %>% names()
+)
+```
+
+Define convenience function to run LASSO regressions.
+
+```{r}
+require(glmnet)
+require(caret)
+require(vip)
+require(pROC)
+
+#Define function to run LASSO regression and return eval results
+run.lasso <- function(
+  c.vars,
+  c.response = "engraftment",
+  set.train = c.train,
+  set.test = c.test,
+  family = "gaussian",
+  var.name,
+  fold = fold,
+  c.res = c.res
+) {
+  #Get data
+  c.train.X <- set.train %>% dplyr::select(c.vars) %>% mutate_all(~replace_na(., min(., na.rm=T))) %>% as.matrix.data.frame()
+  c.test.X <- set.test %>% dplyr::select(c.vars) %>% mutate_all(~replace_na(., min(., na.rm=T))) %>% as.matrix.data.frame()
+  resp.train <- set.train %>% pull(c.response)
+  resp.test <- set.test %>% pull(c.response)
+  
+  #Run cv'ed LASSO regression
+  c.lasso <- cv.glmnet(c.train.X, resp.train, alpha = 1, family = family)
+  
+  #Get standardised coefficients at lambda.1se using the Agresti method
+  sds <- apply(c.train.X, 2, sd)
+  cs <- as.matrix(coef(c.lasso, s = "lambda.1se"))
+  std_coefs <- cs[-1, 1] * sds
+  
+  #Prepare output
+  c.res[["coef"]] <- bind_rows(c.res[["coef"]], tibble(
+    resp.var = c.response,
+    cv.fold = fold,
+    family = family,
+    var.type = var.name,
+    term = c.vars,
+    coef = std_coefs
+  ))
+  
+  #Evaluate model fit and pass outputs
+  c.predict.test <- as.numeric(predict(c.lasso, c.test.X, "lambda.1se"))
+  c.res[["predict"]] <- bind_rows(c.res[["predict"]], tibble(
+    resp.var = c.response,
+    cv.fold = fold,
+    family = family,
+    var.type = var.name,
+    response = resp.test,
+    predicted = c.predict.test
+  ))
+  
+  #Pass metric
+  c.res[["metric"]] <- bind_rows(c.res[["metric"]], tibble(
+    resp.var = c.response,
+    cv.fold = fold,
+    family = family,
+    var.type = var.name,
+    metric = c("rsq", "mse", "rmse"),
+    value = c(
+      metric_rsquared(resp.test, c.predict.test),
+      metric_mse(resp.test, c.predict.test),
+      metric_rmse(resp.test, c.predict.test)
+    )
+  ))
+  
+  #Pass
+  return(c.res)
+}
+```
+
+Run LASSO.
+
+```{r}
+#5-fold cross-validtion, 80:20
+n.fold <- 5
+#Family for model fits
+family <- "gaussian"
+
+#Local results collectors across cv folds
+c.res <- list()
+c.res$predict <- c.res$coef <- c.res$metric <- c.res$roc <- tibble()
+
+#Subselect data
+dat.transmission.rescored %>%
+  filter(fmt.type != "placebo") %>%
+  filter(!sample.post == "SAMEA7082346") %>%
+  left_join(dat.engraft.wide, by = "fmt.id") %>%
+  #=> select variables of interest
+  dplyr::select_(.dots = c("fmt.id", unique(unlist(var_lasso)), "persistence.index", "resilience.index", "engraftment.index", "invasiveness.index", "coexistence.index")) -> c.dat
+
+#Define the list of variables to test
+list.var <- var_lasso
+list.var$a_priori.combined <- c(
+  var_lasso$a_priori.technical,
+  var_lasso$a_priori.community.tax,
+  var_lasso$a_priori.community.metabolic,
+  var_lasso$a_priori.abd.donor,
+  var_lasso$a_priori.abd.pre
+)
+list.var$post_hoc.combined <- c(
+  var_lasso$post_hoc.community.tax,
+  var_lasso$post_hoc.community.metabolic,
+  var_lasso$post_hoc.abd.post,
+  var_lasso$post_hoc.engraftment
+)
+
+#Iterate
+for (k in 1:10) {
+  #Pre-allocate cross-validation folds
+  cv.sample <- sample(1:nrow(c.dat))
+  cv.folds <- split(cv.sample, sort(cv.sample%%n.fold))
+  
+  #Iterate through cross-validation folds
+    for (fold in 1:n.fold) {
+      ##############################
+      #Model engraftment success
+      #=> attempt to predict the fraction of donor strain in the recipient post FMT
+      #=> using R^2 and RMSE as metrics (attempting to predict a continuous variable)
+      #=> attempt to predict in which FMTs the species will successfully take over the community (binary outcome)
+      #=> using AUC as metric
+      #=> but only for species where the total fraction of successful engraftment is ≥15%
+      ##############################
+      #Get current training and test sets
+      c.test <- c.dat[cv.folds[[fold]], ]
+      c.train <- c.dat[unlist(cv.folds[1:n.fold != fold]), ]
+      
+      ##############################
+      #Get models for various variable categories
+      for (resp in c("persistence.index", "resilience.index", "engraftment.index", "invasiveness.index", "coexistence.index")) {
+        #Iterate through variable types and run LASSO
+        for (var.name in names(list.var)) {
+          c.res <- run.lasso(
+            c.vars = list.var[[var.name]],
+            c.response = resp,
+            var.name = var.name,
+            set.train = c.train,
+            set.test = c.test,
+            fold = (k-1) * n.fold + fold,
+            family = family,
+            c.res = c.res
+          )
+      }
+    }
+  }
+}
+```
+
+```{r}
+c.res.fmt <- c.res
+
+c.res$metric %>%
+  filter(metric == "rsq") %>%
+  group_by(resp.var, var.type) %>%
+  dplyr::summarise(rsq.mean = mean(value, na.rm=T)) %>%
+  arrange(resp.var, desc(rsq.mean))
+
+c.res$coef %>%
+  group_by(resp.var, var.type, term) %>%
+  dplyr::summarise(
+    coef.nonzero = sum(coef != 0) / n(),
+    coef.mean = mean(coef)
+  ) %>%
+  ungroup() %>%
+  dplyr::mutate(
+    var.type = fct_relevel(var.type, c(
+      "a_priori.technical",
+      "a_priori.community.tax",
+      "a_priori.community.metabolic", 
+      "a_priori.abd.pre",
+      "a_priori.abd.donor",
+      "a_priori.combined",
+      "post_hoc.community.tax",
+      "post_hoc.community.metabolic",
+      "post_hoc.abd.post",
+      "post_hoc.engraftment",
+      "post_hoc.combined"
+    ))
+  ) -> res.lasso.fmt
+
+res.lasso.fmt %>%
+  filter(coef.nonzero > 0.02) %>%
+  filter(var.type == "a_priori.combined") %>%
+  #group_by(resp.var, var.type) %>% tally()
+  #filter(var.type == "technical") %>%
+  arrange(resp.var, var.type, desc(coef.nonzero))
+```
+
+Compute pairwise correlations of all variables (and extract correlations to `engraftment` variables).
+
+```{r}
+library(corrr)
+
+# dat.transmission.fmt.summarised %>%
+#   left_join(dat.transmission.rescored %>% filter(fmt.type != "placebo") %>% dplyr::select(fmt.id, persistence.index, resilience.index, engraftment.index, invasiveness.index, coexistence.index), by = "fmt.id")
+
+dat.transmission.rescored %>%
+  filter(fmt.id %in% dat.transmission.fmt.summarised$fmt.id) %>%
+  #=> select variables of interest
+  dplyr::select_(.dots = c(unique(unlist(var_lasso[1:5])), "persistence.index", "resilience.index", "engraftment.index", "invasiveness.index", "coexistence.index")) %>%
+  #Drop irrelevant variables
+  #dplyr::select(-fmt.id, -sample.donor, -sample.pre, -sample.post, -study.full, -indication, -fmt.route, -fmt.sample_prep, -vancomycin, -fidaxomycin, -clinical.response.summary, -ET.donor, -ET.pre, -ET.post, -richness.donor, -richness.pre, -depth.donor, -depth.pre, -depth.post, -fr.donor, -fr.pre, -fmt_route.rectal, -bowel_prep, -abx_pre_fmt, -dissimilarity.post_pre, -ET_P.post, -ET_B.post, -ET_F.post, -ET.match.post_pre) %>%
+  #Rescale selected variables
+  dplyr::mutate(
+    timepoint.fmt = (timepoint.fmt - mean(timepoint.fmt)) / sd(timepoint.fmt)
+  ) %>%
+  correlate(use = "pairwise.complete.obs", method = "spearman") %>%
+  dplyr::select(term, persistence.index, resilience.index, engraftment.index, invasiveness.index, coexistence.index) %>%
+  dplyr::mutate(
+    var.category = case_when(
+      term %in% var_lasso$a_priori.technical ~ "technical",
+      term %in% var_lasso$a_priori.community.tax ~ "community.tax",
+      term %in% var_lasso$a_priori.community.metabolic ~ "community.metabolic",
+      term %in% var_lasso$a_priori.abd.donor ~ "abd.donor",
+      term %in% var_lasso$a_priori.abd.pre ~ "abd.pre"
+    )
+  ) %>%
+  drop_na(var.category) -> res.cor
+
+res.cor %>% pull(term) -> order.term.cor
+
+res.cor %>% dplyr::mutate(term = fct_relevel(term, order.term.cor)) -> res.cor
+
+res.cor %>% arrange(persistence.index)
+```
+
+
+## Test for Associations with Clinical Success
+
+Define variables and variable groups.
+
+```{r}
+var_glm.clin_resp <- list(
+  "a_priori" = c("richness.donor.scaled", "richness.pre.scaled", "richness.ratio.donor_pre", "fr.donor.scaled", "fr.pre.scaled", "dissimilarity.donor_pre", "dist_gmm.donor_pre", variables.metabolism.pre, variables.metabolism.donor),
+  "post_hoc" = c("richness.post.scaled", "richness.ratio.post_pre", "fr.post.scaled", "dissimilarity.post_pre", "dist_gmm.post_pre", "proteolysis.post", "saccharolysis.post", "lipolysis.post", "mucin_degradation.post", "propionate_production.post", "butyrate_production.post", "butyrate_production.ratio.post_pre"),
+  "strain_turnover" = c("persistence.index", "resilience.index", "engraftment.index", "invasiveness.index", "coexistence.index")
+)
+```
+
+Run association tests.
+
+```{r, echo = F, warning=F}
+#Local results collectors across cv folds
+c.res <- list()
+c.res$predict <- c.res$coef <- c.res$metric <- tibble()
+c.logFC <- tibble()
+
+dat.transmission.scored.engraftment %>%
+  filter(!sample.post == "SAMEA7082346") %>%
+  group_by(fmt.id) %>% top_n(1, timepoint.fmt) %>% ungroup() %>%
+  filter(species %in% use.species.engraftment.gt_50) %>%
+  dplyr::select(species, fmt.id, engraftment) %>%
+  dplyr::mutate(engraftment = engraftment + 0.001) %>%
+  pivot_wider(values_from = engraftment, names_from = species, values_fill = 0.001) -> tmp.dat.engraft
+
+(data.mOTU.rel + 10^-6) %>%
+  t() %>%
+  as_tibble(rownames = "sample") %>%
+  dplyr::select(c(sample, which(colnames(.) %in% use.species.engraftment))) -> data.mOTU.by_sample
+
+#Subselect data
+dat.transmission.rescored %>%
+  filter(fmt.type != "placebo" & indication %in% c("antibiotics_resistance", "morbus_crohn", "irritable_bowel_syndrome", "melanoma", "ulcerative_colitis", "recurrent_c_diff") & !is.na(clinical.response.summary)) %>%
+  #=> select variables of interest
+  dplyr::select_(.dots = c("fmt.id", "sample.donor", "sample.pre", "sample.post", "indication", "clinical.response.summary", unique(unlist(var_glm.clin_resp)))) %>%
+  dplyr::mutate(
+    clin_resp = case_when(
+      clinical.response.summary == "responder" ~ 1,
+      clinical.response.summary == "non-responder" ~ 0,
+      TRUE ~ as.numeric(NA)
+    )
+  ) %>%
+  select(-clinical.response.summary) %>%
+  #=> add species abundances in donor
+  left_join(data.mOTU.by_sample, by = c("sample.donor" = "sample")) %>%
+  #=> add species abundances in recipient pre-FMT
+  left_join(data.mOTU.by_sample, by = c("sample.pre" = "sample"), suffix = c("", ".abd_pre")) %>%
+  #=> add species abundances in recipient pre-FMT
+  left_join(data.mOTU.by_sample, by = c("sample.post" = "sample"), suffix = c(".abd_donor", ".abd_post")) %>%
+  dplyr::select(-sample.donor, -sample.pre, -sample.post) %>%
+  #=> add engraftment data
+  left_join(tmp.dat.engraft, by = "fmt.id") -> c.dat
+dat.transmission.clinical_response <- c.dat
+
+for (ind in c("antibiotics_resistance", "morbus_crohn", "irritable_bowel_syndrome", "melanoma", "ulcerative_colitis", "recurrent_c_diff")) {
+  c.dat %>% filter(indication == ind) -> m.dat
+  
+  #Run logistic regression for individual factors
+  for (var.type in names(var_glm.clin_resp)) {
+    for (var in var_glm.clin_resp[[var.type]]) {
+      c.lrm <- glm(as.formula(paste("clin_resp ~", var)), data = m.dat, family = binomial(link = "logit"))
+      
+      c.res$metric <- bind_rows(c.res$metric, tibble(
+        indication = ind,
+        type = "glm",
+        var_type = var.type,
+        term = var,
+        pseudoR2 = 1 - c.lrm$deviance / c.lrm$null.deviance
+      ))
+      
+      c.res$coef <- bind_rows(c.res$coef, tibble(
+        indication = ind,
+        type = "glm",
+        var_type = var.type,
+        term = var,
+        logOR = coef(c.lrm)[2],
+        p.raw = coef(summary(c.lrm))[2,4]
+      ))
+    }
+  }
+  
+  #Calculate group differences (clinical success y/n)
+  m.dat %>%
+    pivot_longer(cols = c(-fmt.id, -indication, -clin_resp), names_to = "term") %>%
+    group_by(indication, term) %>%
+    dplyr::summarise(
+      p.raw = wilcox.test(value ~ clin_resp)$p.value,
+      log2FC = log2(mean(value[clin_resp == 1], na.rm=T) / mean(value[clin_resp == 0], na.rm=T))
+    ) %>%
+    bind_rows(c.logFC) -> c.logFC
+}
+```
+
+```{r, fig.width=6, fig.height=4}
+c.res.clin_resp <- c.res
+
+c.logFC %>%
+  distinct() %>%
+  filter(term %in% c("resilience.index", "persistence.index", "engraftment.index", "invasiveness.index", "coexistence.index")) %>%
+  arrange(p.raw)
+
+c.res.clin_resp$coef %>%
+  distinct() %>%
+  filter(term %in% c("resilience.index", "persistence.index", "engraftment.index", "invasiveness.index", "coexistence.index")) %>%
+  arrange(p.raw)
+
+c.res.clin_resp$coef %>%
+  distinct() %>%
+  filter(var_type == "strain_turnover") %>% #arrange(p.raw)
+  mutate(term = fct_relevel(term, unlist(var_glm.clin_resp$strain_turnover))) %>%
+  mutate(logOR = case_when(
+    logOR < -10 ~ -10,
+    logOR > 10 ~ 10,
+    TRUE ~ logOR
+  )) %>%
+  ggplot(aes(x = term, y = indication, colour = logOR, size = abs(logOR))) +
+    geom_point() +
+    scale_colour_distiller(palette = "PRGn", direction = 1) +
+    #facet_grid(indication ~ .) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+      axis.title.x = element_blank()
+    )
+```
+
+```{r}
+c.res.clin_resp$metric %>%
+  distinct() %>%
+  filter(var_type == "strain_turnover") %>%
+  arrange(desc(pseudoR2))
+```
+
+```{r, fig.width=6, fig.height=10}
+dat.transmission.clinical_response %>%
+  dplyr::select(
+    indication,
+    clin_resp,
+    richness.ratio.post_pre,
+    richness.ratio.donor_pre,
+    richness.donor.scaled,
+    dissimilarity.post_pre,
+    persistence.index:coexistence.index,
+    propionate_production.post,
+    butyrate_production.post,
+    mucin_degradation.post,
+    propionate_production.pre,
+    butyrate_production.pre,
+    mucin_degradation.pre,
+    butyrate_production.donor,
+    lipolysis.donor,
+    proteolysis.donor
+    #fr.post.scaled
+  ) %>%
+  pivot_longer(cols = c(-indication, -clin_resp)) %>%
+  mutate(
+    name = fct_relevel(
+      name,
+      "resilience.index",
+      "persistence.index",
+      "coexistence.index",
+      "engraftment.index",
+      "invasiveness.index"
+    )
+  ) %>%
+  ggplot(aes(x = indication, y = value, fill = as.factor(clin_resp), group = interaction(indication, as.factor(clin_resp)))) +
+    geom_hline(yintercept = 0) +
+    geom_boxplot(outlier.colour = NA, alpha = 0.7) +
+    geom_point(position = position_jitterdodge(jitter.width = 0.2), size = 2, alpha=0.7) +
+    scale_fill_manual(values = c("purple", "green")) +
+    #coord_flip() +
+    facet_grid(name ~ ., scales = "free_y") +
+    theme_minimal() +
+    theme(
+      legend.position = "bottom",
+      axis.title = element_blank(),
+      strip.text.y = element_text(angle = 0)
+    )
+```
+
+Run binary tests of clinical success vs species engraftment and/or turnover.
+
+```{r, fig.width=4, fig.height=4}
+#Prefilter data
+dat.transmission.scored %>%
+  #Drop problematic FMTs
+  filter(! (fmt.id %in% c("FMT_Vaughn.02", "FMT_Vaughn.07") & timepoint.fmt == 56)) %>%
+  filter(! (fmt.id %in% c("FAME.06b") & timepoint.fmt == 28)) %>%
+  #Drop autologous FMTs and non-scored FMTs
+  filter(! outcome %in% c("not observed", "novel unclear")) %>%
+  filter(inc.donor | inc.pre | inc.post) %>%
+  filter(! sample.post == "SAMEA7082346") %>%
+  #Subset to species of interest
+  filter(species %in% use.species.engraftment.gt_50) %>%
+  #Subset to last scored timepoint
+  group_by(fmt.id) %>% top_n(1, timepoint.fmt) %>% ungroup() %>%
+  #Subset to indications of interest
+  left_join(data.fmt %>% dplyr::select(fmt.id, indication, clinical.response.summary), by = "fmt.id") %>%
+  filter(indication %in% c("antibiotics_resistance", "morbus_crohn", "irritable_bowel_syndrome", "melanoma", "ulcerative_colitis", "recurrent_c_diff") & !is.na(clinical.response.summary)) %>%
+  dplyr::mutate(clinical_success = ifelse(clinical.response.summary == "non-responder", "nonresponder", clinical.response.summary)) %>%
+  dplyr::select(species:sample.post, outcome, indication, clinical_success) -> tmp.dat.engraft
+
+#Get association tests on engraftment
+tmp.dat.engraft %>% #pull(outcome) %>% table
+  dplyr::mutate(indication = "all") %>%
+  bind_rows(tmp.dat.engraft) %>%
+  filter(!outcome %in% c("species lost", "influx novel", "species retained", "autologous FMT")) %>%
+  group_by(species, indication) %>%
+  filter(n() >= 10) %>% #tally() %>% arrange(n)
+  ungroup() %>%
+  dplyr::mutate(
+    outcome2 = case_when(
+      outcome %in% c("engraftment novel", "engraftment conspecific", "coexistence") ~ "Y",
+      TRUE ~ "N"
+    )
+  ) %>%
+  group_by(species, indication, clinical_success, outcome2) %>%
+  tally() %>%
+  pivot_wider(names_from = c(clinical_success, outcome2), values_from = n, values_fill = 0) %>%
+  mutate(
+    or = fisher.test(matrix(c(responder_Y, responder_N, nonresponder_Y, nonresponder_N), nrow=2))$estimate,
+    p.raw = fisher.test(matrix(c(responder_Y, responder_N, nonresponder_Y, nonresponder_N), nrow=2))$p.value,
+  ) %>%
+  group_by(indication) %>%
+  dplyr::mutate(p = p.adjust(p.raw, method = "BH")) %>%
+  ungroup() %>%
+  mutate(
+    logOR = case_when(
+      or == 0 | (log2(or) < -10) ~ -10,
+      or == Inf | (log2(or) > 10) ~ 10,
+      TRUE ~ log2(or)
+    )
+  ) %>%
+  group_by(species) %>%
+  mutate(n_sig = sum(p.raw < 0.1)) %>%
+  ungroup() %>%
+  filter(n_sig > 0) %>%
+  arrange(logOR) %>%
+  left_join(data.taxonomy.gtdb, by = c("species" = "mOTU")) %>%
+  arrange(phylum, class, order, family, genus) %>%
+  mutate(label=factor(label, levels=unique(label))) %>%
+  ggplot(aes(x = logOR, y = -log10(p.raw))) +
+    geom_point(alpha = 0.4) +
+    facet_wrap(. ~ indication) +
+    theme_minimal()
+  
+  ggplot(aes(x = label, y = indication, fill = logOR)) +
+    geom_tile() +
+    scale_fill_distiller(palette = "PRGn", na.value = "white", direction = 1) +
+    coord_flip() +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+      axis.title.x = element_blank()
+    )
+```
+
+
+## Generate Plots
+
+Define colours by variable type.
+
+```{r}
+col.technical <- "#b2df8a" #technical
+col.community_tax <- "#1f78b4" #community.tax
+col.community_metablic <- "#a6cee3" #community.metabolic
+col.sp_abd_pre <- "#ff7f00" #sp abd pre
+col.sp_abd_donor <- "#fdbf6f" #sp abd donor
+col.combined <- "#c51b7d"  #combined
+
+size.dot <- 2
+
+z_lim.low = -2
+z_lim.high = 2
+```
+
+
+Plot summarised outcomes, ranked by persistence index.
+
+```{r, fig.width=8, fig.height=2}
+#Re-set outcome colours
+PLOT$colour$outcome$species_lost <- "#ffffb3"
+PLOT$colour$outcome$species_retained <- "#FFE206"
+PLOT$colour$outcome$rejection_consp <- "#FFFF33"
+PLOT$colour$outcome$coexist.rec <- "#FDBF6F"
+PLOT$colour$outcome$coexist.donor <- "#ff7f00"
+PLOT$colour$outcome$engraft_consp <- "#A6CEE3"
+PLOT$colour$outcome$engraft_novel <- "#1F78B4"
+PLOT$colour$outcome$influx_consp <- "#DE77AE"
+PLOT$colour$outcome$influx_novel <- "#C51B7D"
+PLOT$colour$outcome$rejection_novel <- "#DEEBF7"
+
+dat.transmission.rescored %>%
+  filter(fmt.type != "placebo") %>%
+  filter(!sample.post == "SAMEA7082346") %>%
+  dplyr::select(fmt.id, indication, n.sp:influx_novel) %>%
+  dplyr::mutate(
+    sp_retained = sp_retained / n.sp.post,
+    reject_consp = reject_consp / n.sp.post,
+    coexist_consp.rec = coexist_consp.rec / n.sp.post,
+    coexist_consp.donor = coexist_consp.donor / n.sp.post,
+    engraft_consp = engraft_consp / n.sp.post,
+    influx_consp = influx_consp / n.sp.post,
+    influx_novel = influx_novel / n.sp.post,
+    engraft_novel = engraft_novel / n.sp.post,
+    sp_lost = sp_lost / n.sp.post,
+    reject_novel = reject_novel / n.sp.post
+  ) %>%
+  pivot_longer(cols = sp_retained:influx_novel, names_to = "type", values_to = "fraction") %>%
+  dplyr::select(fmt.id, indication, resilience.index, type, fraction) %>%
+  dplyr::mutate(
+    fraction = case_when(
+      type == "sp_lost" ~ pmax(0 - 1, 0 - fraction),
+      fraction > 1 ~ 1,
+      TRUE ~ fraction
+    )
+  ) %>%
+  dplyr::mutate(
+    type = fct_relevel(type, c(
+      "reject_novel",
+      "engraft_novel",
+      "influx_novel",
+      "influx_consp",
+      "engraft_consp",
+      "coexist_consp.donor",
+      "coexist_consp.rec",
+      "reject_consp",
+      "sp_retained",
+      "sp_lost"
+    ))
+  ) %>%
+  ggplot(aes(x = fmt.id, y = fraction, group = type, fill = type)) +
+    geom_bar(position = "stack", stat = "identity") +
+    geom_hline(yintercept = c(0,1), colour = "#525252", size = 0.2) +
+    geom_hline(yintercept = dat.transmission.baseline.placebo$sp_retained.by_post, colour = PLOT$colour$outcome$rejection_consp, linetype = "dashed", size = 0.2) +
+    geom_hline(yintercept = 0 - dat.transmission.baseline.placebo$sp_lost.by_post, colour = "grey", linetype = "dashed", size = 0.2) +
+    scale_x_discrete(limits = order.fmt.persistence) +
+    scale_fill_manual(values = c(
+      PLOT$colour$outcome$rejection_novel,
+      PLOT$colour$outcome$engraft_novel,
+      PLOT$colour$outcome$influx_novel,
+      PLOT$colour$outcome$influx_consp,
+      PLOT$colour$outcome$engraft_consp,
+      PLOT$colour$outcome$coexist.donor,
+      PLOT$colour$outcome$coexist.rec,
+      PLOT$colour$outcome$rejection_consp,
+      PLOT$colour$outcome$species_retained,
+      PLOT$colour$outcome$species_lost
+    )) +
+    ylab("Fract of Species post FMT") +
+    #ylim(0, 1) +
+    #scale_colour_manual(values = c( "#ffff33", "#e31a1c", "#6a3d9a")) +
+    #facet_grid(indication ~ .) +
+    theme_bw(base_family = PLOT$font$base_family, base_size = PLOT$font$size.base) +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      #axis.text.x = element_text(angle = -45, vjust = -1, hjust = 1),
+      panel.grid = element_blank(),
+      legend.position = "none"
+    ) -> p.outcome.all
+p.outcome.all
+```
+
+Plot heatmap of outcomes in all species vs all FMTs.
+
+```{r, fig.height=10, fig.width=8}
+#Get ordering of FMTs
+data.fmt %>% #group_by(clinical.response.summary) %>% tally()
+  filter(fmt.id %in% dat.transmission.scored$fmt.id) %>%
+  dplyr::mutate(
+    clinical.response.summary = fct_relevel(clinical.response.summary, c("responder", "non-responder"))
+  ) %>%
+  arrange(indication, fmt.type, clinical.response.summary, study, subject.donor) -> curr.dat.fmt
+
+#Get ordering of species
+data.phenotype.gmm %>%
+  filter(mOTU %in% use.species.engraftment.gt_50) %>%
+  relocate(label) %>%
+  dplyr::select(label:size.genome) %>%
+  dplyr::mutate(
+    taxonomy.summarised = case_when(
+      family %in% c("Lachnospiraceae", "Oscillospiraceae", "Ruminococcaceae") ~ as.character(family),
+      class %in% c("Bacilli") ~ as.character(class),
+      order %in% c("Actinomycetales", "Coriobacteriales", "Desulfovibrionales", "Burkholderiales", "Bacteroidales") ~ as.character(order),
+      order %in% c("Peptostreptococcales", "Monoglobales_A", "Christensenellales", "Oscillospirales", "Lachnospirales") ~ "other Clostridia",
+      TRUE ~ "other"
+    )
+  ) %>%
+  #Re-arragne taxonomic group levels
+  dplyr::mutate(
+    taxonomy.summarised = fct_relevel(taxonomy.summarised, c(
+      "Bacteroidales",
+      "Actinomycetales",
+      "Coriobacteriales",
+      "Desulfovibrionales",
+      "Burkholderiales",
+      "Bacilli",
+      "Oscillospiraceae",
+      "Ruminococcaceae",
+      "Lachnospiraceae",
+      "other Clostridia"
+    ))
+  ) %>%
+  arrange(taxonomy.summarised, class, order, family, genus) -> curr.dat.taxa
+
+#Generate plot
+dat.transmission.scored %>%
+  #Drop problematic FMTs
+  filter(! (fmt.id %in% c("FMT_Vaughn.02", "FMT_Vaughn.07") & timepoint.fmt == 56)) %>%
+  filter(! (fmt.id %in% c("FAME.06b") & timepoint.fmt == 28)) %>%
+  filter(!sample.post == "SAMEA7082346") %>%
+  dplyr::mutate(
+    outcome = case_when(
+      outcome == "autologous FMT" & inc.pre & !inc.post ~ "species lost",
+      outcome == "autologous FMT" & inc.pre & inc.post & influx_score >= 0 & n.pos.scored >= 100 ~ "influx conspecific",
+      outcome == "autologous FMT" & inc.pre & inc.post & influx_score < 0 ~ "species retained",
+      outcome == "autologous FMT" & !inc.pre & inc.post ~ "influx novel",
+      TRUE ~ outcome
+    )
+  ) %>%
+  #Drop autologous FMTs and non-scored FMTs
+  filter(! outcome %in% c("not observed", "novel unclear")) %>%
+  filter(inc.donor | inc.pre | inc.post) %>%
+  #Subset to species of interest
+  filter(species %in% use.species.engraftment.gt_50) %>%
+  #Subset to last scored timepoint
+  group_by(fmt.id) %>% top_n(1, timepoint.fmt) %>% ungroup() %>%
+  #Rearrange order of outcomes
+  dplyr::mutate(outcome = fct_relevel(outcome, c(
+      "rejection novel",
+      "engraftment novel",
+      "influx novel",
+      "influx conspecific",
+      "engraftment conspecific",
+      "coexistence",
+      "rejection conspecific",
+      "species retained",
+      "species lost"
+    ))) %>%
+  dplyr::select(species, fmt.id, outcome) %>%
+  left_join(curr.dat.fmt %>% dplyr::select(fmt.id, indication, fmt.type, clinical.response.summary), by = "fmt.id") %>%
+  left_join(curr.dat.taxa %>% dplyr::select(mOTU, label, taxonomy.summarised), by = c("species" = "mOTU")) %>%
+  #Rearrange order of species and FMTs
+  dplyr::mutate(
+    fmt.id = fct_relevel(fmt.id, as.character(curr.dat.fmt$fmt.id)),
+    species = fct_relevel(species, as.character(curr.dat.taxa$mOTU)),
+    label = fct_relevel(label, rev(as.character(curr.dat.taxa$label)))
+  ) %>%
+  #Plot
+  ggplot(aes(x = fmt.id, y = label, fill = outcome)) +
+    geom_tile() +
+    #scale_x_discrete(limits = curr.dat.fmt$fmt.id) +
+    #scale_y_discrete(limits = rev(curr.dat.taxa$label)) +
+    scale_fill_manual(values = c(
+      PLOT$colour$outcome$rejection_novel,
+      PLOT$colour$outcome$engraft_novel,
+      PLOT$colour$outcome$influx_novel,
+      PLOT$colour$outcome$influx_consp,
+      PLOT$colour$outcome$engraft_consp,
+      PLOT$colour$outcome$coexist.donor,
+      PLOT$colour$outcome$rejection_consp,
+      PLOT$colour$outcome$species_retained,
+      PLOT$colour$outcome$species_lost
+    )) +
+    facet_grid(. ~ indication + fmt.type + clinical.response.summary, scales = "free_x", space = "free_x", drop = T) +
+    theme_minimal() +
+    theme(
+      panel.grid = element_blank(),
+      axis.title = element_blank(),
+      axis.text.x = element_blank(),
+      legend.position = "bottom"
+    ) -> p.outcome.heatmap
+p.outcome.heatmap
+
+ggsave(p.outcome.heatmap, file = paste0(PARAM$folder.base, "manuscript/figure.FMT_ranking/figure.outcome_heatmap.pdf"), width=24, height=30, useDingbats=F)
+```
+
+Plot clinical success vs selected variables.
+
+```{r, fig.width=8, fig.height=2}
+plot.vars <- c(
+  "dissimilarity.donor_pre",
+  "dissimilarity.post_pre",
+  "richness.ratio.donor_pre",
+  "richness.ratio.post_pre",
+  "butyrate_production.pre",
+  "butyrate_production.post_pre",
+  "persistence.index",
+  "resilience.index",
+  "engraftment.index",
+  "invasiveness.index"
+)
+
+dat.transmission.rescored %>%
+  filter(!fmt.type == "placebo") %>%
+  filter(indication %in% c("antibiotics_resistance", "morbus_crohn", "irritable_bowel_syndrome", "melanoma", "ulcerative_colitis", "recurrent_c_diff") & !is.na(clinical.response.summary)) %>%
+  dplyr::mutate(
+    butyrate_production.donor_pre = log2(butyrate_production.donor.norm / butyrate_production.pre.norm),
+    butyrate_production.post_pre = log2(butyrate_production.post.norm / butyrate_production.pre.norm)
+  ) %>%
+  dplyr::select(indication, clinical_success, plot.vars) %>%
+  pivot_longer(cols = c(-indication, -clinical_success)) %>%
+  dplyr::mutate(
+    name = fct_relevel(name, plot.vars),
+    type = case_when(
+      str_detect(name, "\\.pre") | str_detect(name, "\\.donor") ~ "a priori",
+      str_detect(name, "\\.post") ~ "post hoc",
+      TRUE ~ "engraftment"
+    ),
+    type = fct_relevel(type, c("a priori", "post hoc", "engraftment")),
+    clinical_success = as.factor(clinical_success)
+  ) %>%
+  ggplot(aes(x = value, y = indication, group = interaction(indication, clinical_success), colour = clinical_success, fill = clinical_success)) +
+    geom_point(alpha = 0.7, size = PLOT$point.size, position = position_jitterdodge(jitter.width = 0.2), colour = "#969696") +
+    geom_boxplot(outlier.colour = NA, fill = NA, colour = "black") +
+    stat_summary(geom = "point", fun = median, size = 3, alpha = 1, position = position_dodge(width = 0.8)) +
+    scale_colour_manual(values = c("#9970ab", "#5aae61")) +
+    scale_fill_manual(values = c("#9970ab", "#5aae61")) +
+    facet_grid(. ~ name, scale = "free_x") +
+    theme_minimal(base_family = PLOT$font$base_family, base_size = PLOT$font$size.base) +
+    theme(
+      axis.title = element_blank(),
+      panel.grid.major.x = element_blank(),
+      legend.position = "none"
+    )
+
+```
+
+
+Plot indication & technical variables (as occupancy heatmap).
+
+```{r, fig.width=8, fig.height=1}
+dat.transmission.fmt.summarised %>%
+  dplyr::select(fmt.id, indication.mets, indication.esbl, indication.ibs, indication.cd, indication.uc, indication.rcdi, indication.ren, indication.mel, indication.tou, indication.ctr, fmt_sample_prep.fresh, fmt_route.nasal, bowel.prep.summary, clinical_success) %>%
+  pivot_longer(cols = -fmt.id, names_to = "term") %>%
+  dplyr::mutate(value = value > 0) %>%
+  dplyr::mutate(term = str_remove(term, "indication\\.")) %>%
+  dplyr::mutate(term = fct_recode(term, fresh_sample = "fmt_sample_prep.fresh", nasal_route = "fmt_route.nasal", bowel_prep = "bowel.prep.summary")) %>%
+  ggplot(aes(x = fmt.id, y = term, fill = value)) +
+    geom_tile() +
+    scale_x_discrete(limits = order.fmt.persistence) +
+    scale_y_discrete(
+      limits = c(
+        "clinical_success",
+        "nasal_route",
+        "fresh_sample",
+        "bowel_prep",
+        "mets",
+        "esbl",
+        "ctr",
+        "tou",
+        "ren",
+        "mel",
+        "ibs",
+        "cd",
+        "uc",
+        "rcdi"
+      ),
+      labels = c(
+        "clinical success",
+        "FMT route: nasopharyngeal",
+        "fresh stool",
+        "bowel preparation",
+        "metabolic syndrome",
+        "ESBL",
+        "healthy CTR",
+        "Tourette's syndrome",
+        "renal carcinoma",
+        "melanoma",
+        "IBS",
+        "Crohn's disease",
+        "ulcerative colitis",
+        "recurrent CDI"
+      )
+    ) +
+    scale_fill_manual(values = c("white", "#969696"), na.value = "white") +
+    theme_minimal(base_family = PLOT$font$base_family, base_size = PLOT$font$size.base) +
+    theme(
+      axis.title = element_blank(),
+      axis.text.x = element_blank(),
+      #axis.line.y = element_blank(),
+      axis.ticks.x = element_blank(),
+      #axis.text.x = element_text(angle = -45, vjust = -1, hjust = 1),
+      panel.grid = element_blank(),
+      legend.position = "none"
+    ) -> p.technical
+p.technical
+```
+
+Combine outcome plot and heatmap.
+
+```{r, fig.width=8, fig.height=4}
+require(egg)
+
+ggarrange(
+  p.outcome.all +
+    theme(
+      axis.ticks.x = element_blank(),
+      axis.text.y = element_blank(),
+      axis.title.y = element_blank(),
+      panel.border = element_blank()
+    ),
+  p.technical +
+    theme(
+      axis.text.y = element_text(size = 6)
+    ),
+  nrow = 2,
+  heights = c(20, 5)
+) -> p.combined.outcome
+
+ggsave(p.combined.outcome, filename = paste0(PARAM$folder.results, "engraftment.ranking_fmt.outcome.pdf"), width=18, height=9, useDingbats = F, units = "cm")
+```
+
+
+## Circular (polar) plot of LASSO model stats and contributions
+
+Collect the relevant data and variables for plotting.
+
+Prepare R^2 and coefficient data.
+
+```{r}
+#R2
+c.res.fmt$metric %>%
+  filter(metric == "rsq") %>%
+  filter(resp.var %in% c("persistence.index", "engraftment.index")) %>%
+  group_by(resp.var, var.type) %>%
+  dplyr::summarise(rsq = mean(value, na.rm = T)) %>%
+  ungroup() %>%
+  dplyr::mutate(rsq = ifelse(is.na(rsq), 0, rsq)) %>%
+  dplyr::mutate(
+    resp.var = fct_relevel(resp.var, c("persistence.index", "engraftment.index"))
+  ) -> dat.rsq
+
+#Coef
+c.res.fmt$coef %>%
+  filter(resp.var %in% c("persistence.index", "engraftment.index")) %>%
+  group_by(resp.var, var.type, term) %>%
+  dplyr::summarise(
+    coef.nonzero = sum(coef != 0) / n(),
+    coef.mean = mean(coef, na.rm = T)
+  ) %>%
+  dplyr::mutate(
+    vip = case_when(
+      coef.mean > 0 ~ coef.nonzero,
+      coef.mean < 0 ~ 0 - coef.nonzero,
+      TRUE ~ 0
+    )
+    # coef.mean = case_when(
+    #   coef.mean > 0.01 ~ 0.01,
+    #   coef.mean < -0.01 ~ -0.01,
+    #   TRUE ~ coef.mean
+    # )
+  ) %>%
+  ungroup() %>%
+  dplyr::mutate(
+    resp.var = fct_relevel(resp.var, c("persistence.index", "engraftment.index"))
+  ) -> dat.coef
+```
+
+Plot R square overview.
+
+```{r}
+labels.indices <- c(
+  "resilience",
+  "persistence",
+  "coexistence",
+  "engraftment",
+  "invasiveness"
+)
+
+col.indices <- c(
+  PLOT$colour$outcome$species_retained,
+  PLOT$colour$outcome$rejection_consp,
+  PLOT$colour$outcome$coexist.donor,
+  PLOT$colour$outcome$engraft_consp,
+  PLOT$colour$outcome$engraft_novel
+)
+
+pt_size.lollipop <- 2
+```
+
+```{r}
+c.res.fmt$metric %>%
+  filter(metric == "rsq") %>%
+  filter(resp.var %in% c("persistence.index", "engraftment.index")) %>%
+  group_by(resp.var, var.type) %>%
+  dplyr::summarise(rsq = mean(value, na.rm = T)) %>%
+  ungroup() %>%
+  dplyr::mutate(rsq = ifelse(is.na(rsq), 0, rsq)) %>%
+  dplyr::mutate(
+    resp.var = str_remove(resp.var, "\\.index"),
+    resp.var = fct_relevel(resp.var, c("persistence", "engraftment"))
+  )  %>%
+  separate(var.type, into = c("scope", "type"), sep = "\\.", extra = "merge") %>%
+  mutate(
+    type = fct_relevel(type, rev(c("combined", "technical", "community.tax", "community.metabolic", "abd.pre", "abd.donor", "abd.post", "engraftment")))
+  ) -> tmp
+
+ggplot(tmp %>% filter(scope == "a_priori"), aes(x = rsq, y = type, colour = resp.var)) +
+  geom_vline(xintercept = tmp %>% filter(scope == "a_priori" & resp.var == "persistence" & type == "combined") %>% pull(rsq), linetype = "dashed", colour = PLOT$colour$outcome$species_retained, size = 1.5) +
+  geom_vline(xintercept = tmp %>% filter(scope == "a_priori" & resp.var == "engraftment" & type == "combined") %>% pull(rsq), linetype = "dashed", colour = PLOT$colour$outcome$engraft_consp, size = 1.5) +
+  geom_linerange(aes(xmin = 0, xmax = rsq, y = type), position = position_dodge2(width = 0.8)) +
+  geom_point(size = 3, position = position_dodge2(width = 0.8)) +
+  scale_colour_manual(values = c(PLOT$colour$outcome$species_retained, PLOT$colour$outcome$engraft_novel)) +
+  scale_x_continuous(limits = c(0,1), breaks = seq(0, 1, by = 0.25), labels = c("0", "", "0.5", "", "1")) +
+  theme_minimal() +
+  theme(
+    axis.title = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    legend.position = "none"
+  ) -> p.rsq.a_priori
+p.rsq.a_priori
+
+ggsave(p.rsq.a_priori, filename = paste0(PARAM$folder.results, "engraftment.ranking_fmt.var.a_priori.new_lollipop.pdf"), width=3, height=3.5, useDingbats = F, units = "cm")
+```
+
+```{r}
+ggplot(tmp %>% filter(scope == "post_hoc"), aes(x = rsq, y = type, colour = resp.var)) +
+  geom_vline(xintercept = tmp %>% filter(scope == "post_hoc" & resp.var == "persistence" & type == "combined") %>% pull(rsq), linetype = "dashed", colour = PLOT$colour$outcome$species_retained, size = 1.5) +
+  geom_vline(xintercept = tmp %>% filter(scope == "post_hoc" & resp.var == "engraftment" & type == "combined") %>% pull(rsq), linetype = "dashed", colour = PLOT$colour$outcome$engraft_consp, size = 1.5) +
+  geom_linerange(aes(xmin = 0, xmax = rsq, y = type), position = position_dodge2(width = 0.8)) +
+  geom_point(size = 3, position = position_dodge2(width = 0.8)) +
+  scale_colour_manual(values = c(PLOT$colour$outcome$species_retained, PLOT$colour$outcome$engraft_novel)) +
+  scale_x_continuous(limits = c(0,1), breaks = seq(0, 1, by = 0.25), labels = c("0", "", "0.5", "", "1")) +
+  theme_minimal() +
+  theme(
+    axis.title = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    legend.position = "none"
+  ) -> p.rsq.post_hoc
+p.rsq.post_hoc
+
+ggsave(p.rsq.post_hoc, filename = paste0(PARAM$folder.results, "engraftment.ranking_fmt.var.post_hoc.new_lollipop.pdf"), width=3, height=3.5, useDingbats = F, units = "cm")
+```
+
+```{r}
+labels.indices <- c(
+  "persistence",
+  "engraftment"
+)
+
+col.indices <- c(
+  PLOT$colour$outcome$rejection_consp,
+  PLOT$colour$outcome$engraft_consp
+)
+```
+
+```{r}
+dat.coef %>%
+  filter(resp.var %in% c("persistence.index", "engraftment.index")) %>%
+  filter(var.type == "a_priori.community.metabolic") %>%
+  group_by(var.type, term) %>%
+  dplyr::mutate(vip.mean = mean(coef.nonzero)) %>%
+  ungroup() %>%
+  arrange(var.type, desc(vip.mean)) %>%
+  filter(vip.mean >= 0.1) %>%
+  distinct(var.type, term, vip.mean)
+```
+
+Pre-define variables to use in different plots.
+
+```{r}
+plot.vars <- list(
+  a_priori.technical = c(
+    "indication.rcdi",
+    "indication.uc",
+    "indication.mets",
+    "bowel.prep.summary",
+    "antibiotics.summary",
+    "fmt_sample_prep.fresh",
+    "fmt_route.nasal"
+  ),
+  a_priori.community.tax = c(
+    "dissimilarity.donor_pre",
+    "richness.pre.scaled",
+    "richness.donor.scaled",
+    "fr.pre.scaled"
+  ),
+  a_priori.community.metabolic = c(
+    "dist_gmm.donor_pre",
+    "saccharolysis.pre",
+    "saccharolysis.donor",
+    "butyrate_production.pre",
+    "butyrate_production.donor"
+  ),
+  post_hoc.community.tax = c(
+    "dissimilarity.post_pre",
+    "richness.ratio.post_pre",
+    "richness.post.scaled"
+  ),
+  post_hoc.community.metabolic = c(
+    "dist_gmm.post_pre",
+    "butyrate_production.ratio.post_pre",
+    "mucin_degradation.ratio.post_pre"
+  )
+)
+
+plot.labels <- list(
+  a_priori.technical = c(
+    "recurrent CDI",
+    "metabolic syndrome",
+    "melanoma",
+    "bowel preparation",
+    "antibiotics pre-FMT",
+    "fresh stool",
+    "nasal route",
+    "seq depth"
+  ),
+  a_priori.community.tax =  c(
+    "dissimilarity donor-pre",
+    "sp richnes (rec)",
+    "sp richness (don)",
+    "functional redundancy (rec)"
+  ),
+  a_priori.community.metabolic = c(
+    "metabolic dissim. donor-pre",
+    "saccharolysis (rec)",
+    "saccharolysis (don)",
+    "butyrogenesis (rec)",
+    "butyrogenesis (don)"
+  ),
+  post_hoc.community.tax = c(
+    "dissimilarity post-pre",
+    "sp richness ratio post:pre",
+    "sp richness (post)"
+  ),
+  post_hoc.community.metabolic = c(
+    "metabolic dissim. post-pre",
+    "butyrogenesis ratio post:pre",
+    "mucin degradation ratio post:pre"
+  )
+)
+
+#Add species abundances in recipient pre-FMT
+dat.coef %>%
+  filter(var.type == "a_priori.abd.pre") %>%
+  filter(resp.var %in% c("persistence.index", "engraftment.index")) %>%
+  group_by(term) %>%
+  dplyr::mutate(vip.mean = mean(coef.nonzero)) %>%
+  ungroup() %>%
+  arrange(desc(vip.mean)) %>%
+  filter(vip.mean >= 0.24 | coef.nonzero >= 0.8) %>%
+  distinct(term, vip.mean) %>%
+  dplyr::mutate(mOTU = str_remove(term, "\\.abd_pre")) %>%
+  left_join(data.phenotype.gmm.gt_20 %>% dplyr::select(mOTU, phylum, order, family, label), by = "mOTU") %>%
+  dplyr::mutate(order = fct_relevel(order, "Bacteroidales")) %>%
+  arrange(order, family, desc(vip.mean)) -> tmp
+plot.vars[["a_priori.abd.pre"]] <- tmp %>% pull(term)
+plot.labels[["a_priori.abd.pre"]] <- tmp %>% pull(label)
+
+#Add species abundances in donor pre-FMT
+dat.coef %>%
+  filter(var.type == "a_priori.abd.donor") %>%
+  filter(resp.var %in% c("persistence.index", "engraftment.index")) %>%
+  group_by(term) %>%
+  dplyr::mutate(vip.mean = mean(coef.nonzero)) %>%
+  ungroup() %>%
+  arrange(desc(vip.mean)) %>%
+  filter(vip.mean >= 0.3 | coef.nonzero >= 0.8) %>%
+  distinct(term, vip.mean) %>%
+  dplyr::mutate(mOTU = str_remove(term, "abd_donor")) %>%
+  dplyr::mutate(mOTU = str_remove(term, "\\.abd_donor")) %>%
+  left_join(data.phenotype.gmm.gt_20 %>% dplyr::select(mOTU, phylum, order, family, label), by = "mOTU") %>%
+  dplyr::mutate(order = fct_relevel(order, "Bacteroidales")) %>%
+  arrange(order, family, desc(vip.mean)) -> tmp
+plot.vars[["a_priori.abd.donor"]] <- tmp %>% pull(term)
+plot.labels[["a_priori.abd.donor"]] <- tmp %>% pull(label)
+
+#Add species abundances in recipient post-FMT
+dat.coef %>%
+  filter(var.type == "post_hoc.abd.post") %>%
+  group_by(term) %>%
+  dplyr::mutate(vip.mean = mean(coef.nonzero)) %>%
+  ungroup() %>%
+  arrange(desc(vip.mean)) %>%
+  filter(vip.mean >= 0.16 | coef.nonzero >= 0.8 | coef.nonzero <= -0.8) %>%
+  distinct(term, vip.mean) %>%
+  dplyr::mutate(mOTU = str_remove(term, "\\.abd_post")) %>%
+  left_join(data.phenotype.gmm.gt_20 %>% dplyr::select(mOTU, phylum, order, family, label), by = "mOTU") %>%
+  dplyr::mutate(order = fct_relevel(order, "Bacteroidales")) %>%
+  arrange(order, family, desc(vip.mean)) -> tmp
+plot.vars[["post_hoc.abd.post"]] <- tmp %>% pull(term)
+plot.labels[["post_hoc.abd.post"]] <- tmp %>% pull(label)
+
+#Add species engraftment info
+dat.coef %>%
+  filter(var.type == "post_hoc.engraftment") %>%
+  group_by(term) %>%
+  dplyr::mutate(vip.mean = mean(coef.nonzero)) %>%
+  ungroup() %>%
+  arrange(desc(vip.mean)) %>%
+  filter(vip.mean >= 0.4 | coef.nonzero >= 0.8 | coef.nonzero <= -0.8) %>%
+  distinct(term, vip.mean) %>%
+  dplyr::mutate(mOTU = str_remove(term, "\\.engraft")) %>%
+  left_join(data.phenotype.gmm.gt_20 %>% dplyr::select(mOTU, phylum, order, family, label), by = "mOTU") %>%
+  dplyr::mutate(order = fct_relevel(order, "Bacteroidales")) %>%
+  arrange(order, family, desc(vip.mean)) -> tmp
+plot.vars[["post_hoc.engraftment"]] <- tmp %>% pull(term)
+plot.labels[["post_hoc.engraftment"]] <- tmp %>% pull(label)
+```
+
+Prepare data for plotting.
+
+```{r}
+dat.coef %>%
+  filter(resp.var %in% c("persistence.index", "engraftment.index")) %>%
+  filter(term %in% c(plot.vars$a_priori.technical, plot.vars$a_priori.community.tax, plot.vars$a_priori.community.metabolic, plot.vars$a_priori.abd.pre, plot.vars$a_priori.abd.donor)) %>%
+  mutate(
+    type = case_when(
+      term %in% plot.vars$a_priori.technical ~ "technical",
+      term %in% plot.vars$a_priori.community.tax ~ "community diversity",
+      term %in% plot.vars$a_priori.community.metabolic ~ "community metabolic",
+      term %in% plot.vars$a_priori.abd.pre ~ "sp abd pre",
+      term %in% plot.vars$a_priori.abd.donor ~ "sp abd donor"
+    ),
+    type = fct_relevel(type, c("technical", "community diversity", "community metabolic", "sp abd pre", "sp abd donor")),
+    scope = case_when(
+      type == "sp abd pre" ~ "rec",
+      type == "sp abd donor" ~ "donor",
+      grepl("donor_pre", term) ~ "compl",
+      grepl("donor", term) ~ "donor",
+      grepl("pre", term) | grepl("indication", term) | term %in% c("antibiotics.summary", "fmt_route.nasal") ~ "rec"
+    ),
+    term = fct_relevel(term, c(plot.vars$a_priori.technical, plot.vars$a_priori.community.tax, plot.vars$a_priori.community.metabolic, plot.vars$a_priori.abd.pre, plot.vars$a_priori.abd.donor)),
+    coef.mean = case_when(
+      coef.mean > 0.05 ~ 0.05,
+      coef.mean < -0.05 ~ -0.05,
+      TRUE ~ coef.mean
+    )
+  ) -> dat.coef.plot
+
+dat.coef.plot %>%
+  group_by(term) %>%
+  tally %>%
+  mutate(name = str_remove(term, "\\..+")) %>%
+  left_join(data.taxonomy.gtdb, by = c("name" = "mOTU")) %>%
+  relocate(label)
+```
+
+Generate VIP heatmap.
+
+```{r}
+dat.coef.plot %>%
+  filter(var.type == "a_priori.combined") %>%
+  mutate(resp.var = fct_relevel(resp.var, "persistence.index")) %>%
+  mutate(vip = ifelse(resp.var == "engraftment.index", abs(vip), 0 - abs(vip))) %>%
+  ggplot(aes(x = term, y = resp.var, fill = vip)) +
+    geom_tile() +
+    scale_fill_gradient2(low = PLOT$colour$outcome$species_retained, mid = "white", midpoint = 0, high = PLOT$colour$outcome$engraftment_consp) +
+    facet_grid(. ~ type, scales = "free", space = "free") +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      axis.title = element_blank(),
+      panel.grid = element_blank(),
+      strip.text = element_blank(),
+      axis.text = element_blank(),
+      panel.border = element_rect(fill = NA, size = 0.2, colour = "#525252"),
+      panel.spacing.x = unit(0.3, "cm")
+    ) -> p.heatmap.vip
+p.heatmap.vip
+```
+
+Plot for both colonisation and persistence a_priori.
+
+```{r}
+dat.coef.plot %>%
+  filter(var.type != "a_priori.combined") %>%
+  ggplot(aes(x = term, y = coef.mean, colour = resp.var)) +
+    geom_segment(aes(x = term, xend = term, y = coef.mean, yend = 0)) +
+    geom_point(size = 2) +
+    geom_hline(yintercept = 0, colour = "#525252") +
+    scale_y_continuous(limits = c(-0.05, 0.05)) +
+    scale_colour_manual(values = c(PLOT$colour$outcome$species_retained, PLOT$colour$outcome$engraftment_consp)) +
+    facet_grid(. ~ type, scales = "free_x", space = "free_x") +
+    theme_minimal()  +
+    theme(
+      axis.title = element_blank(),
+      strip.text = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(),
+      axis.text = element_blank(),
+      panel.spacing.x = unit(0.3, "cm"),
+      legend.position = "none"
+    ) -> p.coef.a_priori.both
+p.coef.a_priori.both
+```
+
+Plot for colonisation a_priori.
+
+```{r}
+dat.coef.plot %>%
+  filter(var.type != "a_priori.combined" & resp.var == "engraftment.index") %>%
+  ggplot(aes(x = term, y = coef.mean)) +
+    geom_bar(stat = "identity", fill = PLOT$colour$outcome$engraftment_consp) +
+    geom_hline(yintercept = 0, colour = "#525252") +
+    scale_y_continuous(limits = c(-0.05, 0.05)) +
+    facet_grid(. ~ type, scales = "free_x", space = "free_x") +
+    theme_minimal()  +
+    theme(
+      axis.title = element_blank(),
+      strip.text = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(),
+      #axis.text = element_blank(),
+      panel.spacing.x = unit(0.3, "cm")
+    ) -> p.coef.a_priori.engraft
+p.coef.a_priori.engraft
+```
+
+Plot for persistence a_priori.
+
+```{r}
+dat.coef.plot %>%
+  filter(var.type != "a_priori.combined" & resp.var == "persistence.index") %>%
+  ggplot(aes(x = term, y = coef.mean)) +
+    geom_bar(stat = "identity", fill = PLOT$colour$outcome$species_retained) +
+    geom_hline(yintercept = 0, colour = "#525252") +
+    scale_y_continuous(limits = c(-0.05, 0.05)) +
+    facet_grid(. ~ type, scales = "free_x", space = "free_x") +
+    theme_minimal() +
+    theme(
+      axis.title = element_blank(),
+      strip.text = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(),
+      axis.text = element_blank(),
+      panel.spacing.x = unit(0.3, "cm")
+    ) -> p.coef.a_priori.persist
+p.coef.a_priori.persist
+```
+
+Prepare data for post-hoc plots.
+
+```{r}
+dat.coef %>%
+  filter(resp.var %in% c("persistence.index", "engraftment.index")) %>%
+  filter(term %in% c(plot.vars$post_hoc.community.tax, plot.vars$post_hoc.community.metabolic, plot.vars$post_hoc.abd.post, plot.vars$post_hoc.engraftment)) %>%
+  mutate(
+    type = case_when(
+      term %in% plot.vars$post_hoc.community.tax ~ "community diversity",
+      term %in% plot.vars$post_hoc.community.metabolic ~ "community metabolic",
+      term %in% plot.vars$post_hoc.abd.post ~ "sp abd post",
+      term %in% plot.vars$post_hoc.engraftment ~ "colonisation"
+    ),
+    type = fct_relevel(type, c("community diversity", "community metabolic", "sp abd post", "colonisation")),
+    term = fct_relevel(term, c(plot.vars$post_hoc.community.tax, plot.vars$post_hoc.community.metabolic, plot.vars$post_hoc.abd.post, plot.vars$post_hoc.engraftment)),
+    coef.mean = case_when(
+      coef.mean > 0.05 ~ 0.05,
+      coef.mean < -0.05 ~ -0.05,
+      TRUE ~ coef.mean
+    )
+  ) -> dat.coef.plot
+
+dat.coef.plot %>%
+  group_by(term) %>%
+  tally %>%
+  mutate(name = str_remove(term, "\\..+")) %>%
+  left_join(data.taxonomy.gtdb, by = c("name" = "mOTU")) %>%
+  relocate(label)
+```
+
+Heatmap plot for post_hoc vip.
+
+```{r}
+dat.coef.plot %>%
+  filter(var.type == "post_hoc.combined") %>%
+  mutate(resp.var = fct_relevel(resp.var, "persistence.index")) %>%
+  mutate(vip = ifelse(resp.var == "engraftment.index", abs(vip), 0 - abs(vip))) %>%
+  ggplot(aes(x = term, y = resp.var, fill = vip)) +
+    geom_tile() +
+    scale_fill_gradient2(low = PLOT$colour$outcome$species_retained, mid = "white", midpoint = 0, high = PLOT$colour$outcome$engraftment_consp) +
+    facet_grid(. ~ type, scales = "free", space = "free") +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      axis.title = element_blank(),
+      panel.grid = element_blank(),
+      strip.text = element_blank(),
+      axis.text = element_blank(),
+      panel.border = element_rect(fill = NA, size = 0.2, colour = "#525252"),
+      panel.spacing.x = unit(0.3, "cm")
+    ) -> p.heatmap.vip.post_hoc
+p.heatmap.vip.post_hoc
+```
+
+Plot for both colonisation and persistence post_hoc
+
+```{r}
+dat.coef.plot %>%
+  filter(var.type != "post_hoc.combined") %>%
+  ggplot(aes(x = term, y = coef.mean, colour = resp.var)) +
+    geom_segment(aes(x = term, xend = term, y = coef.mean, yend = 0)) +
+    geom_point(size = 2) +
+    geom_hline(yintercept = 0, colour = "#525252") +
+    scale_y_continuous(limits = c(-0.05, 0.05)) +
+    scale_colour_manual(values = c(PLOT$colour$outcome$species_retained, PLOT$colour$outcome$engraftment_consp)) +
+    facet_grid(. ~ type, scales = "free_x", space = "free_x") +
+    theme_minimal()  +
+    theme(
+      axis.title = element_blank(),
+      strip.text = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(),
+      axis.text = element_blank(),
+      panel.spacing.x = unit(0.3, "cm"),
+      legend.position = "none"
+    ) -> p.coef.post_hoc.both
+p.coef.post_hoc.both
+```
+
+Plot for colonisation post_hoc.
+
+```{r}
+dat.coef.plot %>%
+  filter(var.type != "post_hoc.combined" & resp.var == "engraftment.index") %>%
+  ggplot(aes(x = term, y = coef.mean)) +
+    geom_bar(stat = "identity", fill = PLOT$colour$outcome$engraftment_consp) +
+    geom_hline(yintercept = 0, colour = "#525252") +
+    scale_y_continuous(limits = c(-0.05, 0.05)) +
+    facet_grid(. ~ type, scales = "free_x", space = "free_x") +
+    theme_minimal()  +
+    theme(
+      axis.title = element_blank(),
+      strip.text = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(),
+      axis.text = element_blank(),
+      panel.spacing.x = unit(0.3, "cm")
+    ) -> p.coef.post_hoc.engraft
+p.coef.post_hoc.engraft
+```
+
+Plot for persistence post_hoc
+
+```{r}
+dat.coef.plot %>%
+  filter(var.type != "post_hoc.combined" & resp.var == "persistence.index") %>%
+  ggplot(aes(x = term, y = coef.mean)) +
+    geom_bar(stat = "identity", fill = PLOT$colour$outcome$species_retained) +
+    geom_hline(yintercept = 0, colour = "#525252") +
+    scale_y_continuous(limits = c(-0.05, 0.05)) +
+    facet_grid(. ~ type, scales = "free_x", space = "free_x") +
+    theme_minimal() +
+    theme(
+      axis.title = element_blank(),
+      strip.text = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(),
+      axis.text = element_blank(),
+      panel.spacing.x = unit(0.3, "cm")
+    ) -> p.coef.post_hoc.persist
+p.coef.post_hoc.persist
+```
+
+Put all these `egg`s into baskets.
+
+```{r, fig.width=8, fig.height=2}
+require(egg)
+
+#a priori plots
+ggarrange(
+  #Colonisation
+  p.coef.a_priori.both +
+    theme(
+      axis.ticks.y = element_blank(),
+      panel.spacing.x = unit(0.2, "cm"),
+      plot.margin = margin(r = 0, l = 0, t = 0, b = 1),
+      panel.border = element_rect(fill = NA, size = 0.2, colour = "#525252")
+    ),
+  #VIP heatmaps
+  p.heatmap.vip +
+    theme(
+      panel.spacing.x = unit(0.2, "cm"),
+      panel.spacing.y = unit(0.1, "cm"),
+      plot.margin = margin(r = 0, l = 0, t = 1, b = 0),
+     # axis.text.x = element_text(size = 5, angle = 45, vjust = 1, hjust = 1)
+    ),
+  heights = c(8, 2)
+) -> p.combined.a_priori.new
+
+#a priori plots
+ggarrange(
+  #Colonisation
+  p.coef.post_hoc.both +
+    theme(
+      axis.ticks.y = element_blank(),
+      panel.spacing.x = unit(0.2, "cm"),
+      plot.margin = margin(r = 0, l = 0, t = 0, b = 1),
+      panel.border = element_rect(fill = NA, size = 0.2, colour = "#525252")
+    ),
+  #VIP heatmaps
+  p.heatmap.vip.post_hoc +
+    theme(
+      panel.spacing.x = unit(0.2, "cm"),
+      panel.spacing.y = unit(0.1, "cm"),
+      plot.margin = margin(r = 0, l = 0, t = 1, b = 0),
+     # axis.text.x = element_text(size = 5, angle = 45, vjust = 1, hjust = 1)
+    ),
+  heights = c(8, 2)
+) -> p.combined.post_hoc.new
+
+ggsave(p.combined.a_priori.new, filename = paste0(PARAM$folder.results, "engraftment.ranking_fmt.var.a_priori.new.pdf"), width=12, height=2, useDingbats = F, units = "cm")
+ggsave(p.combined.post_hoc.new, filename = paste0(PARAM$folder.results, "engraftment.ranking_fmt.var.post_hoc.new.pdf"), width=12, height=2, useDingbats = F, units = "cm")
+```
+
+
+
+
+
+
+
+

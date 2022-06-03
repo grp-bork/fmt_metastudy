@@ -1,0 +1,130 @@
+---
+title: 'Analysis: Prepare Allele Diversity Data'
+author: "Sebastian Schmidt"
+date: "2020-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+```
+
+## Prepare Environment
+
+```{r Load Libraries, echo=F}
+library("tidyverse", warn.conflicts=F, quietly=T)
+```
+
+Set file names and basic parameters.
+
+```{r Set Parameters}
+#Preallocate global data structures
+PARAM <- list()
+
+#Set relevant folder names
+PARAM$folder.Rmd <- paste0(getwd(), "/")
+PARAM$folder.base <- gsub("Rmd/", "", PARAM$folder.Rmd)
+PARAM$folder.data <- paste0(PARAM$folder.base, "data/")
+PARAM$folder.results <- paste0(PARAM$folder.base, "results/")
+
+#Sample data
+PARAM$file.sample <- paste0(PARAM$folder.data, "data.sample.Rdata")
+#Count table data
+PARAM$file.mOTU <- paste0(PARAM$folder.data, "data.mOTU.Rdata")
+#Count table data for non-mOTU species clusters
+PARAM$file.mOTU.ANI <- paste0(PARAM$folder.data, "data.coverage.COG.MAG.Rdata")
+#Count table and beta div data
+PARAM$file.beta_div <- paste0(PARAM$folder.data, "data.beta_div.Rdata")
+#Per-genome data
+PARAM$file.data_genome <- paste0(PARAM$folder.data, "genome_data.combined.Rdata")
+PARAM$file.data_genome_sets <- paste0(PARAM$folder.data, "data.genome_sets.Rdata")
+```
+
+Load data.
+
+```{r}
+load(PARAM$file.sample)
+load(PARAM$file.mOTU)
+load(PARAM$file.mOTU.ANI)
+load(PARAM$file.data_genome)
+load(PARAM$file.data_genome_sets)
+```
+
+Prepare taxon incidence data per sample.
+
+```{r}
+#Tibble-fy mOTU abundance data
+data.mOTU.rel %>%
+  as_tibble(rownames = "species") %>%
+  gather("sample", "rel_abd", -species) %>%
+  mutate(incidence = rel_abd > 0) %>%
+  dplyr::select(-rel_abd) -> data.mOTU.tbl
+
+#Fill abundance data for non-mOTU ANI cluster species
+dat.cov.COG %>%
+  dplyr::select(-n_cog, -ver_cov.mean, -ver_cov.sd) %>%
+  spread("sample_alias", "ver_cov.median", fill = 0) %>%
+  gather("sample", "abd", -species) %>%
+  dplyr::mutate(incidence = abd > 0) %>%
+  dplyr::select(-abd) %>%
+  bind_rows(data.mOTU.tbl) -> data.incidence.taxa
+```
+
+
+## Parse and Process Data
+
+Load data on SNV-based quantification of engraftment/rejection patterns and on shuffled background comparisons.
+
+```{r}
+#Get all results files for per-species SNV-based transmission quantification
+files.allele_div <- list.files(path=paste0(PARAM$folder.results, "allele.diversity"), pattern=".RData", full.names = T, recursive = F)
+
+#Preallocate
+tmp.allele_div <- list()
+
+#Loop through species and load data
+for (f in files.allele_div) {
+  load(f)
+  
+  #Extract current mOTU ID
+  str_replace(pattern = ".+\\/", replacement = "", string = f) %>% str_replace("\\.RData", "") %>% str_replace(".+\\.", "") -> curr.motu
+  
+  #writeLines(paste(date(), "=>", curr.motu))
+  
+  #Append to existing data structure
+  tmp.allele_div[[f]] <- dat.allele_diversity
+}
+
+#Put everything together
+dat.allele_diversity <- bind_rows(tmp.allele_div)
+
+#Filter diversity estimates by minimum number of considered positions and minimum core genome coverage
+dat.allele_diversity %>%
+  relocate(species) %>%
+  left_join(data.incidence.taxa) %>%
+  filter(n.pos > 100 & hor_cov.total > 1000 & incidence) %>%
+  #Normalize allele diversities (as standard Z scores)
+  group_by(species) %>%
+  dplyr::mutate(
+    allele_div.norm = (allele_div - mean(allele_div)) / sd(allele_div)
+  ) %>%
+  dplyr::select(-incidence) -> dat.allele_diversity.filtered
+  
+```
+
+Store.
+
+```{r}
+save(dat.allele_diversity, dat.allele_diversity.filtered, file = paste0(PARAM$folder.data, "data.allele_diversity.Rdata"))
+```
+
+
+----
+
+
+
+
+
+
+

@@ -1,0 +1,647 @@
+---
+title: 'Figure: Species Ranking by Engraftment'
+author: "Sebastian Schmidt"
+date: "2021-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+options(stringsAsFactors = FALSE)
+```
+
+## Prepare Environment
+
+```{r Load Libraries, echo=F, warning=FALSE}
+library("tidyverse", warn.conflicts=F, quietly=T)
+```
+
+Set file names and basic parameters.
+
+```{r Set Parameters}
+#Preallocate global data structures
+PARAM <- list()
+
+#Set relevant folder names
+PARAM$folder.Rmd <- paste0(getwd(), "/")
+PARAM$folder.base <- gsub("Rmd/", "", PARAM$folder.Rmd)
+
+load(paste0(PARAM$folder.base, "data/param.analysis_transmission.Rdata"))
+```
+
+Load data.
+
+```{r}
+#load(PARAM$file.sample)
+load(PARAM$file.sample)
+load(PARAM$file.phenotype)
+load(PARAM$file.data_transmission)
+load(PARAM$file.data_transmission.scored)
+load(PARAM$file.data_transmission.scored.consolidated)
+load(PARAM$file.mOTU)
+load(PARAM$file.mOTU.ANI)
+load(PARAM$file.tree)
+load(PARAM$file.beta_div)
+load(PARAM$file.allele_distances)
+load(PARAM$file.allele_diversity)
+load(PARAM$file.gmm_gmgc)
+load(PARAM$file.gmm_species)
+load(PARAM$file.sample)
+
+#LASSO results
+load(paste0(PARAM$folder.results, "results.engraftment.LASSO.Rdata"))
+#OLS regression results
+load(paste0(PARAM$folder.results, "results.engraftment.OLS.Rdata"))
+```
+
+Reset some parameters
+
+```{r}
+PLOT$point.size <- 0.5
+
+#Re-set outcome colours
+PLOT$colour$outcome$species_lost <- "#ffffb3"
+PLOT$colour$outcome$species_retained <- "#FFE206"
+PLOT$colour$outcome$rejection_consp <- "#FFFF33"
+PLOT$colour$outcome$coexist.rec <- "#FDBF6F"
+PLOT$colour$outcome$coexist.donor <- "#ff7f00"
+PLOT$colour$outcome$engraft_consp <- "#A6CEE3"
+PLOT$colour$outcome$engraft_novel <- "#1F78B4"
+PLOT$colour$outcome$influx_consp <- "#DE77AE"
+PLOT$colour$outcome$influx_novel <- "#C51B7D"
+PLOT$colour$outcome$rejection_novel <- "#DEEBF7"
+```
+
+## Species Ranking
+
+Plot engraftment per species, ranked by "successful" engraftment across scored FMTs.
+
+### Prepare data
+
+Pre-compute summarised engraftment data.
+
+```{r}
+#Subset engraftment results to species scored in >= 50 FMTs
+dat.transmission.scored.outcome %>%
+  group_by(fmt.id) %>% top_n(1, timepoint.fmt) %>% ungroup() %>%
+  filter(species %in% use.species.engraftment.gt_50) -> dat.transmission.scored.outcome.subset
+
+#Summarise FMT outcomes
+dat.transmission.scored.outcome.subset %>%
+  dplyr::select(species, frac.don:influx_novel, inc.post) %>%
+  pivot_longer(frac.don:influx_novel, names_to = "type") %>%
+  group_by(species, type) %>%
+  dplyr::summarise(
+    n.FMT = n(),
+    val = sum(value) / sum(inc.post)
+  ) %>%
+  ungroup() %>%
+  pivot_wider(names_from = "type", values_from = "val") %>%
+  arrange(frac.rec) -> dat.transmission.scored.outcome.subset.summarised
+
+#Summarise frequency of binarised outcome scenarios per species
+dat.transmission.scored.outcome.subset %>%
+  dplyr::select(species, oc.donor_takeover:oc.rec_turnover) %>%
+  group_by(species) %>%
+  dplyr::mutate(n.FMT = 1) %>%
+  summarise_all(sum) %>%
+  ungroup() %>%
+  dplyr::mutate(
+    across(oc.donor_takeover:oc.rec_turnover, ~.x / n.FMT)
+  ) %>%
+  arrange(oc.rec_resilience) -> dat.transmission.scored.outcome.subset.summarised.by_outcome
+```
+
+Pre-compute different types of species rankings.
+
+```{r}
+#Get order of species
+dat.transmission.scored.outcome.subset.summarised %>% pull(species) -> order.species.frac_rec
+dat.transmission.scored.outcome.subset.summarised.by_outcome %>% pull(species) -> order.species.resilience
+
+#Get ordered labels as well
+data.phenotype.gmm.gt_20 %>%
+  filter(mOTU %in% order.species.frac_rec) %>%
+  dplyr::mutate(mOTU = fct_relevel(mOTU, order.species.frac_rec)) %>%
+  arrange(mOTU) %>%
+  pull(label) -> order.label.frac_rec
+
+data.phenotype.gmm.gt_20 %>%
+  filter(mOTU %in% order.species.resilience) %>%
+  dplyr::mutate(mOTU = fct_relevel(mOTU, order.species.resilience)) %>%
+  arrange(mOTU) %>%
+  pull(label) -> order.label.resilience
+```
+
+### Make Plots
+
+Generate outcome-ranked plot.
+
+```{r, fig.width=10, fig.height=4}
+dat.transmission.scored.outcome.subset.summarised %>%
+  dplyr::select(-frac.don, -frac.rec, -frac.coexist) %>%
+  pivot_longer(cols = c(-species, -n.FMT), names_to = "type", values_to = "fraction") %>%
+  dplyr::mutate(
+    fraction = case_when(
+      type == "sp_lost" ~ pmax(0 - 1, 0 - fraction),
+      fraction > 1 ~ 1,
+      TRUE ~ fraction
+    )
+  ) %>%
+  dplyr::mutate(
+    type = fct_relevel(type, c(
+      "reject_novel",
+      "engraft_novel",
+      "influx_novel",
+      "influx_consp",
+      "engraft_consp",
+      "coexist_consp.donor",
+      "coexist_consp.rec",
+      "reject_consp",
+      "sp_retained",
+      "sp_lost"
+    ))
+  ) %>%
+  left_join(data.phenotype.gmm.gt_20 %>% dplyr::select(mOTU, order), by = c("species" = "mOTU")) %>%
+  ggplot(aes(x = species, y = fraction, group = type, fill = type)) +
+    geom_bar(position = "stack", stat = "identity") +
+    geom_hline(yintercept = c(0,1), colour = "#525252", size = 0.2) +
+    scale_x_discrete(limits = order.species.frac_rec, labels = order.label.frac_rec, position = "top") +
+    scale_fill_manual(values = c(
+      PLOT$colour$outcome$rejection_novel,
+      PLOT$colour$outcome$engraft_novel,
+      PLOT$colour$outcome$influx_novel,
+      PLOT$colour$outcome$influx_consp,
+      PLOT$colour$outcome$engraft_consp,
+      PLOT$colour$outcome$coexist.donor,
+      PLOT$colour$outcome$coexist.rec,
+      PLOT$colour$outcome$rejection_consp,
+      PLOT$colour$outcome$species_retained,
+      PLOT$colour$outcome$species_lost
+    )) +
+    ylab("Average Outcome post FMT") +
+    theme_bw(base_family = PLOT$font$base_family, base_size = PLOT$font$size.base) +
+    theme(
+      axis.title = element_blank(),
+      axis.text.x = element_blank(),
+      #axis.text.x = element_text(angle = -45, vjust = -1, hjust = 1),
+      axis.text.y = element_blank(),
+      panel.grid = element_blank(),
+      legend.position = "none"
+    ) -> p.engraftment_frac.ranked
+p.engraftment_frac.ranked
+```
+
+Do the same thing, but faceted by taxonomic group.
+
+```{r, fig.width=10, fig.height=4}
+dat.transmission.scored.outcome.subset.summarised %>%
+  dplyr::select(-frac.don, -frac.rec, -frac.coexist) %>%
+  pivot_longer(cols = c(-species, -n.FMT), names_to = "type", values_to = "fraction") %>%
+  dplyr::mutate(
+    fraction = case_when(
+      type == "sp_lost" ~ pmax(0 - 1, 0 - fraction),
+      fraction > 1 ~ 1,
+      TRUE ~ fraction
+    )
+  ) %>%
+  dplyr::mutate(
+    type = fct_relevel(type, c(
+      "reject_novel",
+      "engraft_novel",
+      "influx_novel",
+      "influx_consp",
+      "engraft_consp",
+      "coexist_consp.donor",
+      "coexist_consp.rec",
+      "reject_consp",
+      "sp_retained",
+      "sp_lost"
+    ))
+  ) %>%
+  left_join(data.phenotype.gmm.gt_20 %>% dplyr::select(mOTU, kingdom:genus, label), by = c("species" = "mOTU")) %>%
+  mutate(
+    taxonomy.summarised = case_when(
+      genus %in% c("Bacteroides", "Phocaeicola") ~ "Bacteroides sp.",
+      order == "Bacteroidales" ~ "other Bacteroidales",
+      phylum %in% c("Proteobacteria") ~ as.character(phylum),
+      class %in% c("Bacilli", "Negativicutes") ~ as.character(class),
+      order %in% c("Actinomycetales", "Coriobacteriales") ~ as.character(order),
+      grepl("Blauti", genus) ~ "Blautia sp.",
+      grepl("Eubacter", genus) ~ "Eubacterium sp.",
+      grepl("Dorea", genus) ~ "Dorea sp.",
+      grepl("Enteroclost", genus) ~ "Enterocloster sp.",
+      grepl("Lachnospira", genus) ~ "Lachnospira sp.",
+      genus %in% c("Faecalibacterium") ~ "Faecalibacterium sp.",
+      genus %in% c("Gemmiger") ~ "Gemmiger sp.",
+      grepl("Ruminococc", genus) ~ "Ruminococcus sp.",
+      grepl("Oscillibacter", genus) ~ "Oscillibacter sp.",
+      genus %in% c("Lawsonibacter") ~ "Lawsonibacter sp.",
+      family %in% c("Lachnospiraceae", "Ruminococcaceae", "Oscillospiraceae") ~ paste("other", as.character(family)),
+      class %in% c("Clostridia", "Clostridia_A") ~ "other Clostridia",
+      #order %in% c("Peptostreptococcales", "Monoglobales_A", "Christensenellales", "Oscillospirales", "Lachnospirales") ~ "other Clostridia",
+      TRUE ~ "other"
+    ),
+    taxonomy.summarised = fct_relevel(taxonomy.summarised, c(
+      "Bacteroides sp.",
+      "other Bacteroidales",
+      "Actinomycetales",
+      "Coriobacteriales",
+      "Proteobacteria",
+      "Bacilli",
+      "Negativicutes",
+      "Oscillibacter sp.",
+      "Lawsonibacter sp.",
+      "other Oscillospiraceae",
+      "Blautia sp.",
+      "Eubacterium sp.",
+      "Dorea sp.",
+      "Enterocloster sp.",
+      "Lachnospira sp.",
+      "other Lachnospiraceae",
+      "Faecalibacterium sp.",
+      "Gemmiger sp.",
+      "Ruminococcus sp.",
+      "other Ruminococcaceae",
+      "other Clostridia",
+      "other"
+    )),
+    species = fct_relevel(species, order.species.frac_rec),
+    label = fct_relevel(label, order.label.frac_rec)
+  ) -> dat.outcome.stacked_bar
+
+dat.outcome.stacked_bar %>%
+  filter(type %in% c("sp_retained", "reject_consp")) %>%
+  group_by(species, taxonomy.summarised) %>%
+  summarise(fraction = sum(fraction)) %>%
+  group_by(taxonomy.summarised) %>%
+  summarise(fraction = mean(fraction)) -> tmp.summarised.persist
+
+dat.outcome.stacked_bar %>%
+  filter(type %in% c("sp_retained", "reject_consp", "coexist_consp.donor", "coexist_consp.rec")) %>%
+  group_by(species, taxonomy.summarised) %>%
+  summarise(fraction = sum(fraction)) %>%
+  group_by(taxonomy.summarised) %>%
+  summarise(fraction = mean(fraction)) -> tmp.summarised.persist_coexist
+
+dat.outcome.stacked_bar %>%
+  ggplot(aes(x = species, y = fraction, group = type, fill = type)) +
+    geom_bar(position = "stack", stat = "identity") +
+    geom_hline(yintercept = c(0,1), colour = "#525252", size = 0.2) +
+    scale_fill_manual(values = c(
+      PLOT$colour$outcome$rejection_novel,
+      PLOT$colour$outcome$engraft_novel,
+      PLOT$colour$outcome$influx_novel,
+      PLOT$colour$outcome$influx_consp,
+      PLOT$colour$outcome$engraft_consp,
+      PLOT$colour$outcome$coexist.donor,
+      PLOT$colour$outcome$coexist.rec,
+      PLOT$colour$outcome$rejection_consp,
+      PLOT$colour$outcome$species_retained,
+      PLOT$colour$outcome$species_lost
+    )) +
+    facet_grid(. ~ taxonomy.summarised, scales = "free_x", space = "free_x") +
+    geom_hline(data = tmp.summarised.persist, aes(yintercept = fraction), colour = "#cc4c02", size = 0.5, linetype = "dashed") +
+    geom_hline(data = tmp.summarised.persist_coexist, aes(yintercept = fraction), colour = "#993404", size = 0.5, linetype = "dashed") +
+    theme_minimal(base_family = PLOT$font$base_family, base_size = PLOT$font$size.base) +
+    theme(
+      axis.title = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      panel.grid = element_blank(),
+      strip.text = element_blank(),
+      legend.position = "none"
+    ) -> p.engraftment_frac.ranked
+p.engraftment_frac.ranked
+```
+
+Re-plot the fraction of recipient resilience, coexistence, donor takeover and novel strain influx events, gridded by taxonomy.
+
+```{r, fig.height=4, fig.width=10}
+dat.outcome.stacked_bar %>%
+  filter(!type %in% c("sp_retained", "reject_consp", "sp_lost", "reject_novel")) %>%
+  mutate(
+    outcome_summary = case_when(
+      type %in% c("engraft_novel", "engraft_consp", "coexist_consp.donor", "coexist_consp.rec") ~ "colonisation",
+      type %in% c("influx_novel", "influx_consp") ~ "influx"
+    ),
+    type = fct_relevel(type, rev(c(
+      "engraft_novel",
+      "engraft_consp",
+      "coexist_consp.donor",
+      "coexist_consp.rec",
+      "influx_novel",
+      "influx_consp"
+    )))
+  ) -> tmp
+
+tmp %>%
+  filter(outcome_summary == "influx") %>%
+  group_by(species, outcome_summary, taxonomy.summarised) %>%
+  summarise(fraction = sum(fraction)) %>%
+  group_by(outcome_summary, taxonomy.summarised) %>%
+  summarise(fraction = mean(fraction)) -> tmp.summarised.influx
+
+tmp %>%
+  filter(type %in% c("engraft_novel", "engraft_consp")) %>%
+  group_by(species, outcome_summary, taxonomy.summarised) %>%
+  summarise(fraction = sum(fraction)) %>%
+  group_by(outcome_summary, taxonomy.summarised) %>%
+  summarise(fraction = mean(fraction)) -> tmp.summarised.takeover
+
+tmp %>%
+  filter(outcome_summary == "colonisation") %>%
+  group_by(species, outcome_summary, taxonomy.summarised) %>%
+  summarise(fraction = sum(fraction)) %>%
+  group_by(outcome_summary, taxonomy.summarised) %>%
+  summarise(fraction = mean(fraction)) -> tmp.summarised.colonisation
+
+tmp %>%
+  ggplot(aes(x = species, y = fraction, group = interaction(type, outcome_summary), fill = type)) +
+    geom_hline(yintercept = c(0, 0.5, 1), colour = "#525252", size = 0.2) +
+    geom_bar(position = "stack", stat = "identity") +
+    scale_fill_manual(values = rev(c(
+      PLOT$colour$outcome$engraft_novel,
+      PLOT$colour$outcome$engraft_consp,
+      PLOT$colour$outcome$coexist.donor,
+      PLOT$colour$outcome$coexist.rec,
+      PLOT$colour$outcome$influx_novel,
+      PLOT$colour$outcome$influx_consp
+    ))) +
+    facet_grid(outcome_summary ~ taxonomy.summarised, scales = "free_x", space = "free_x") +
+    geom_hline(data = tmp.summarised.colonisation, aes(yintercept = fraction), colour = "#6baed6", size = 0.5, linetype = "dashed") +
+    geom_hline(data = tmp.summarised.takeover, aes(yintercept = fraction), colour = "#2171b5", size = 0.5, linetype = "dashed") +
+    geom_hline(data = tmp.summarised.influx, aes(yintercept = fraction), colour = "#ae017e", size = 0.5, linetype = "dashed") +
+    theme_minimal(base_family = PLOT$font$base_family, base_size = PLOT$font$size.base) +
+    theme(
+      axis.title = element_blank(),
+      axis.text.x = element_blank(),
+      #axis.text.x = element_text(angle = -45, vjust = -1, hjust = 1),
+      axis.text.y = element_blank(),
+      panel.grid = element_blank(),
+      strip.text = element_blank(),
+      legend.position = "none"
+    ) -> p.engraftment_frac.ranked.subsets
+p.engraftment_frac.ranked.subsets
+```
+
+Egg these plots together.
+
+```{r, fig.width=10, fig.height=6}
+require(egg)
+
+ggarrange(
+  p.engraftment_frac.ranked + theme(plot.margin = margin(r = 0, l = 0, t = 0, b = 1), panel.spacing.x = unit(0.05, "cm")),
+  p.engraftment_frac.ranked.subsets + theme(plot.margin = margin(r = 0, l = 0, t = 1, b = 0), panel.spacing.x = unit(0.05, "cm")),
+  heights = c(3, 2)
+) -> p.engraftment_frac.ranked.combined
+
+ggsave(p.engraftment_frac.ranked.combined, filename = paste0(PARAM$folder.results, "engraftment.ranking_species.stacked_bars.pdf"), width=15, height=10, useDingbats = F, units = "cm")
+
+```
+
+Plot AUCs for most common outcomes as matching lollipops.
+
+```{r, fig.width=10, fig.height=4}
+collect.res.engraft.lasso.metric %>%
+  filter(metric == "auc") %>%
+  filter(species %in% use.species.engraftment.gt_50) %>%
+  filter(var.type == "ex_ante.combined") %>%
+  filter(resp.var %in% c("oc.donor_takeover", "oc.donor_engraftment", "oc.rec_persistence", "oc.rec_turnover")) %>% group_by(resp.var) %>% summarise(mu = mean(avg), sd = sd(avg))
+  select(species, resp.var, avg) %>%
+  bind_rows(
+    tibble(species = c("meta_mOTU_v2_6218", "meta_mOTU_v2_6288", "meta_mOTU_v2_5934", "ANI_AL_95_00021", "meta_mOTU_v2_7682", "ref_mOTU_v2_5068", "meta_mOTU_v2_6107", "ref_mOTU_v2_0144"), resp.var = "oc.donor_takeover", avg = 1)
+  ) %>%
+  mutate(resp.var = fct_relevel(resp.var, c("oc.rec_persistence", "oc.donor_engraftment", "oc.donor_takeover", "oc.rec_turnover"))) %>%
+  mutate(avg = ifelse(avg < 0.5, 0.5, avg)) %>%
+  left_join(data.phenotype.gmm.gt_20 %>% dplyr::select(mOTU, kingdom:genus, label), by = c("species" = "mOTU")) %>%
+  mutate(
+    taxonomy.summarised = case_when(
+      genus %in% c("Bacteroides", "Phocaeicola") ~ "Bacteroides sp.",
+      order == "Bacteroidales" ~ "other Bacteroidales",
+      phylum %in% c("Proteobacteria") ~ as.character(phylum),
+      class %in% c("Bacilli", "Negativicutes") ~ as.character(class),
+      order %in% c("Actinomycetales", "Coriobacteriales") ~ as.character(order),
+      grepl("Blauti", genus) ~ "Blautia sp.",
+      grepl("Eubacter", genus) ~ "Eubacterium sp.",
+      grepl("Dorea", genus) ~ "Dorea sp.",
+      grepl("Enteroclost", genus) ~ "Enterocloster sp.",
+      grepl("Lachnospira", genus) ~ "Lachnospira sp.",
+      genus %in% c("Faecalibacterium") ~ "Faecalibacterium sp.",
+      genus %in% c("Gemmiger") ~ "Gemmiger sp.",
+      grepl("Ruminococc", genus) ~ "Ruminococcus sp.",
+      grepl("Oscillibacter", genus) ~ "Oscillibacter sp.",
+      genus %in% c("Lawsonibacter") ~ "Lawsonibacter sp.",
+      family %in% c("Lachnospiraceae", "Ruminococcaceae", "Oscillospiraceae") ~ paste("other", as.character(family)),
+      class %in% c("Clostridia", "Clostridia_A") ~ "other Clostridia",
+      TRUE ~ "other"
+    ),
+    taxonomy.summarised = fct_relevel(taxonomy.summarised, c(
+      "Bacteroides sp.",
+      "other Bacteroidales",
+      "Actinomycetales",
+      "Coriobacteriales",
+      "Proteobacteria",
+      "Bacilli",
+      "Negativicutes",
+      "Oscillibacter sp.",
+      "Lawsonibacter sp.",
+      "other Oscillospiraceae",
+      "Blautia sp.",
+      "Eubacterium sp.",
+      "Dorea sp.",
+      "Enterocloster sp.",
+      "Lachnospira sp.",
+      "other Lachnospiraceae",
+      "Faecalibacterium sp.",
+      "Gemmiger sp.",
+      "Ruminococcus sp.",
+      "other Ruminococcaceae",
+      "other Clostridia",
+      "other"
+    )),
+    species = fct_relevel(species, order.species.frac_rec),
+    label = fct_relevel(label, order.label.frac_rec)
+  ) -> dat.auc.for_stacked_bars
+
+
+dat.auc.for_stacked_bars %>%
+  ggplot(aes(x = label, y = avg, colour = resp.var)) +
+    geom_hline(yintercept = c(0.5, 0.75, 1), colour = "#525252", size = 0.2) +
+    geom_point(size = 0.75) +
+    geom_segment(aes(x = label, xend = label, y = avg, yend = 0.5), size = 0.2) +
+    scale_colour_manual(values = c(
+      PLOT$colour$outcome$species_retained,
+      PLOT$colour$outcome$engraft_consp,
+      PLOT$colour$outcome$engraft_novel,
+      PLOT$colour$outcome$influx_novel
+    )) +
+    facet_grid(resp.var ~ taxonomy.summarised, space = "free_x", scales = "free_x") +
+    theme_minimal() +
+    theme(
+      axis.title = element_blank(),
+      axis.text.x = element_blank(),
+      #axis.text.x = element_text(angle = -45, vjust = -1, hjust = 1),
+      axis.text.y = element_blank(),
+      panel.grid = element_blank(),
+      strip.text = element_blank(),
+      plot.margin = margin(r = 0, l = 0, t = 0, b = 0),
+      panel.spacing.x = unit(0.05, "cm"),
+      panel.spacing.y = unit(0.1, "cm"),
+      legend.position = "none"
+    ) -> p.auc.for_stacked
+
+ggsave(p.auc.for_stacked, filename = paste0(PARAM$folder.results, "engraftment.ranking_species.auc_for_stacked_bars.pdf"), width=15, height=2.5, useDingbats = F, units = "cm")
+```
+
+Generate margin plot summarizing the frequencies for each outcome.
+
+```{r}
+size.point <- 0.2
+
+dat.transmission.scored.outcome.subset.summarised %>%
+  dplyr::select(-frac.don, -frac.rec, -frac.coexist) %>%
+  pivot_longer(cols = c(-species, -n.FMT), names_to = "type", values_to = "fraction") %>%
+  dplyr::mutate(
+    fraction = case_when(
+      fraction > 1 ~ 1,
+      TRUE ~ fraction
+    )
+  ) %>%
+  dplyr::mutate(
+    type = fct_relevel(type, rev(c(
+      "reject_novel",
+      "engraft_novel",
+      "influx_novel",
+      "influx_consp",
+      "engraft_consp",
+      "coexist_consp.donor",
+      "coexist_consp.rec",
+      "reject_consp",
+      "sp_retained",
+      "sp_lost"
+    )))
+  ) %>%
+  ggplot(aes(y = type, x = fraction, fill = type, colour = type)) +
+    geom_vline(xintercept = c(0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.75, 1), colour = "#969696", lwd = 0.2) +
+    #Add jittered points
+    geom_point(position = position_jitterdodge(jitter.width = 2), alpha = 0.7, size = size.point) +
+    #Add boxplot
+    geom_boxplot(outlier.colour = NA, lwd = 0.2, alpha = 1) +
+    stat_summary(fun = median, geom = "crossbar", width = 0.75, colour = "#ffffff", lwd = 0.4) +
+    stat_summary(fun = median, geom = "point", colour = "#ffffff", size = 1, shape = 1) +
+    #Fix scales
+    scale_fill_manual(values = rev(c(
+      PLOT$colour$outcome$rejection_novel,
+      PLOT$colour$outcome$engraft_novel,
+      PLOT$colour$outcome$influx_novel,
+      PLOT$colour$outcome$influx_consp,
+      PLOT$colour$outcome$engraft_consp,
+      PLOT$colour$outcome$coexist.donor,
+      PLOT$colour$outcome$coexist.rec,
+      PLOT$colour$outcome$rejection_consp,
+      PLOT$colour$outcome$species_retained,
+      PLOT$colour$outcome$species_lost
+    ))) +
+    scale_colour_manual(values = rev(c(
+      PLOT$colour$outcome$rejection_novel,
+      PLOT$colour$outcome$engraft_novel,
+      PLOT$colour$outcome$influx_novel,
+      PLOT$colour$outcome$influx_consp,
+      PLOT$colour$outcome$engraft_consp,
+      PLOT$colour$outcome$coexist.donor,
+      PLOT$colour$outcome$coexist.rec,
+      PLOT$colour$outcome$rejection_consp,
+      PLOT$colour$outcome$species_retained,
+      PLOT$colour$outcome$species_lost
+    ))) +
+    xlim(0, 1) +
+    theme_minimal(base_family = PLOT$font$base_family, base_size = PLOT$font$size.base) +
+    theme(
+      axis.title = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.y = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      panel.grid = element_blank(),
+      panel.background = element_blank(),
+      plot.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "cm"),
+      legend.position = "none"
+    ) -> p.outcome.boxplots
+p.outcome.boxplots
+
+ggsave(p.outcome.boxplots, filename = paste0(PARAM$folder.results, "engraftment.ranking_species.summary_boxplots.pdf"), width=1.45, height=3.52, useDingbats = F, units = "cm")
+```
+
+
+### Phenotype plots
+
+Test marginal association of species phenotype to overall engraftment success.
+
+```{r, fig.width=1, fig.height=1}
+phenotype.variables <- c("motility", "sporulation", "oxygen.facultative", "acetate_production", "propionate_production", "butyrate_production")
+phenotype_metabolism.variables <- c("saccharolysis", "proteolysis", "lipolysis")
+
+dat.transmission.scored.engraftment %>%
+  group_by(fmt.id) %>% top_n(1, timepoint.fmt) %>% ungroup() %>%
+  filter(species %in% use.species.engraftment) %>%
+  dplyr::mutate(
+    engraftment = case_when(
+      n.pos.scored < 100 ~ 0,
+      !inc.donor ~ 0,
+      outcome %in% c("rejection novel", "species lost") ~ 0,
+      TRUE ~ donor.specific
+    )
+  ) %>%
+  dplyr::select(species, phenotype.variables, phenotype_metabolism.variables, outcome) %>%
+  dplyr::select(-acetate_production, -motility, -oxygen.facultative) %>%
+  group_by(across(-outcome)) %>%
+  dplyr::summarise(engraft.frac = sum(outcome %in% c("engraftment novel", "engraftment conspecific", "coexistence")) / n()) %>%
+  pivot_longer(c(-species, -engraft.frac), names_to = "variable", values_to ="value") %>%
+  drop_na(value) -> dat.tmp
+
+dat.tmp %>%
+  group_by(variable) %>%
+  nest() %>%
+  dplyr::mutate(
+    model = purrr::map(data, function(df) {anova(lm(engraft.frac ~ value, data = df)) %>% broom::tidy() %>% mutate(rsq = sumsq / sum(sumsq))}),
+    cor = purrr::map(data, ~cor(.$engraft.frac, .$value, method = "spearman"))
+  ) %>%
+  dplyr::select(-data) %>%
+  unnest() %>%
+  filter(term != "Residuals") -> res.engraftment.phenotype
+
+#Plot
+res.engraftment.phenotype %>%
+  dplyr::mutate(rsq.directional = ifelse(cor < 0, 0 - rsq, rsq)) %>%
+  dplyr::mutate(
+    type = case_when(
+      p.value < 0.05 & cor > 0 ~ "pos",
+      p.value < 0.05 & cor < 0 ~ "neg",
+      TRUE ~ "n.s."
+    )
+  ) %>%
+  ggplot(aes(x = rsq, y = variable, colour = type)) +
+    geom_vline(xintercept = 0, colour = "#252525") +
+    geom_segment(aes(x = rsq, xend = 0, y = variable, yend = variable)) +
+    geom_point(size = 1) +
+    xlim(0, 0.1) +
+    scale_color_manual(values = c("grey", "#542788", "#e08214")) +
+    scale_y_discrete(limits = rev(c("propionate_production", "butyrate_production", "saccharolysis", "proteolysis", "lipolysis"))) +
+    theme_bw(base_family = PLOT$font$base_family, base_size = PLOT$font$size.base) +
+    theme(
+      axis.title = element_blank(),
+      axis.text.x = element_blank(),
+      #axis.text.x = element_text(angle = -45, vjust = -1, hjust = 1),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.y = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      legend.position = "none"
+    ) -> p.engraftment.phenotype.margin
+p.engraftment.phenotype.margin
+```
+
+
+

@@ -1,0 +1,548 @@
+---
+title: 'Figure: Species Ranking by Engraftment'
+author: "Sebastian Schmidt"
+date: "2021-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+options(stringsAsFactors = FALSE)
+```
+
+## Prepare Environment
+
+```{r Load Libraries, echo=F, warning=FALSE}
+library("tidyverse", warn.conflicts=F, quietly=T)
+```
+
+Set file names and basic parameters.
+
+```{r Set Parameters}
+#Preallocate global data structures
+PARAM <- list()
+
+#Set relevant folder names
+PARAM$folder.Rmd <- paste0(getwd(), "/")
+PARAM$folder.base <- gsub("Rmd/", "", PARAM$folder.Rmd)
+
+load(paste0(PARAM$folder.base, "data/param.analysis_transmission.Rdata"))
+```
+
+Load data.
+
+```{r}
+#load(PARAM$file.sample)
+load(PARAM$file.sample)
+load(PARAM$file.phenotype)
+load(PARAM$file.data_transmission)
+load(PARAM$file.data_transmission.scored)
+load(PARAM$file.data_transmission.scored.consolidated)
+load(PARAM$file.mOTU)
+load(PARAM$file.mOTU.ANI)
+load(PARAM$file.tree)
+load(PARAM$file.beta_div)
+load(PARAM$file.allele_distances)
+load(PARAM$file.allele_diversity)
+load(PARAM$file.gmm_gmgc)
+load(PARAM$file.gmm_species)
+load(PARAM$file.sample)
+
+#LASSO results
+load(paste0(PARAM$folder.results, "results.engraftment.LASSO.Rdata"))
+#OLS regression results
+load(paste0(PARAM$folder.results, "results.engraftment.OLS.Rdata"))
+```
+
+Reset some parameters
+
+```{r}
+PLOT$point.size <- 0.5
+
+#Re-set outcome colours
+PLOT$colour$outcome$species_lost <- "#ffffb3"
+PLOT$colour$outcome$species_retained <- "#FFE206"
+PLOT$colour$outcome$rejection_consp <- "#FFFF33"
+PLOT$colour$outcome$coexist.rec <- "#FDBF6F"
+PLOT$colour$outcome$coexist.donor <- "#ff7f00"
+PLOT$colour$outcome$engraft_consp <- "#A6CEE3"
+PLOT$colour$outcome$engraft_novel <- "#1F78B4"
+PLOT$colour$outcome$influx_consp <- "#DE77AE"
+PLOT$colour$outcome$influx_novel <- "#C51B7D"
+PLOT$colour$outcome$rejection_novel <- "#DEEBF7"
+```
+
+## Plot AUCs on Outcome Predictability
+
+```{r, fig.width=10, fig.height=4}
+collect.res.engraft.lasso.metric %>%
+  filter(resp.var %in% c("oc.donor_takeover", "oc.rec_resilience", "oc.rec_turnover")) %>%
+  filter(non.trivial>0.2) %>%
+  filter(metric == "auc") %>% #group_by(resp.var, var.type) %>% tally() %>% arrange(desc(n))
+  select(-metric, -non.trivial, auc=avg) %>%
+  mutate(auc = ifelse(auc<0.5, 0.5, auc)) %>%
+  separate(var.type, into = c("scope", "type"), sep = "\\.", extra = "merge") %>%
+  #filter(scope == "ex_ante") %>%
+  mutate(
+    type = fct_relevel(type, c(
+      "combined",
+      "technical",
+      "community.tax", "community.metabolic",
+      "abd_pre", "abd_pre.facilitation", "abd_pre.exclusion",
+      "abd_donor", "abd_donor.facilitation", "abd_donor.exclusion",
+      "abd_post", "abd_post.pos", "abd_post.neg",
+      "focal_species",
+      "engraftment"
+    )),
+    var.group = case_when(
+      type == "combined" ~ "full",
+      type %in% c("community.tax", "community.metabolic") ~ "community",
+      grepl("abd_pre", type) ~ "abd_pre",
+      grepl("abd_donor", type) ~ "abd_donor",
+      grepl("abd_post", type) ~ "abd_post",
+      type %in% c("technical", "focal_species", "engraftment") ~ as.character(type)
+    ),
+    var.group = fct_relevel(var.group, c("full", "technical", "community", "abd_pre", "abd_donor", "abd_post", "focal_species", "engraftment")),
+    resp.var = fct_relevel(resp.var, c("oc.rec_resilience", "oc.donor_takeover", "oc.rec_turnover"))
+  ) %>%
+  ggplot(aes(x = type, y = auc, color = resp.var, fill = resp.var, group = interaction(resp.var, type), alpha = auc)) +
+    geom_hline(yintercept = c(0.5, 0.6, 0.7, 0.8, 0.9, 1), colour = "#969696", lwd = 0.2) +
+    #Add jittered points
+    geom_point(position = position_jitterdodge(jitter.width = 0.1), size = 0.4) +
+    #Add boxplot
+    geom_boxplot(outlier.colour = NA, lwd = 0.2, alpha = 1) +
+    stat_summary(fun = median, geom = "crossbar", width = 0.75, colour = "#ffffff", lwd = 0.4, position = position_dodge()) +
+    stat_summary(fun = median, geom = "point", colour = "#ffffff", size = 1, shape = 1, position = position_dodge(width = 0.75)) +
+    scale_alpha_continuous(range = c(0.1, 0.9), limits = c(0.5, 1)) +
+    scale_colour_manual(values = c(
+      PLOT$colour$outcome$species_retained,
+      #PLOT$colour$outcome$engraft_consp,
+      PLOT$colour$outcome$engraft_novel,
+      PLOT$colour$outcome$influx_novel
+    )) +
+    scale_fill_manual(values = c(
+      PLOT$colour$outcome$species_retained,
+      #PLOT$colour$outcome$engraft_consp,
+      PLOT$colour$outcome$engraft_novel,
+      PLOT$colour$outcome$influx_novel
+    )) +
+    facet_grid(. ~ scope + var.group, scales = "free_x", space = "free_x") +
+    theme_minimal() +
+    theme(
+      axis.title = element_blank(),
+      axis.text = element_blank(),
+      panel.grid = element_blank(),
+      strip.text = element_blank(),
+      plot.margin = margin(r = 0, l = 0, t = 0, b = 0),
+      panel.spacing.x = unit(0.05, "cm"),
+      legend.position = "none"
+    ) -> p.auc_boxplot
+p.auc_boxplot
+
+ggsave(p.auc_boxplot, filename = paste0(PARAM$folder.results, "engraftment.lasso_species.auc_boxplots.pdf"), width=13, height=2.5, useDingbats = F, units = "cm")
+```
+
+
+## Plot as network(s)
+
+First, define set of species and set of variables to include.
+
+```{r}
+collect.res.engraft.lasso.metric %>%
+  filter(resp.var %in% c("oc.rec_turnover", "oc.donor_takeover") & var.type == "ex_ante.combined") %>%
+  filter(non.trivial>0.2) %>%
+  group_by(species) %>% filter(n() > 1) %>%
+  pull(species) %>% unique -> use.species.lasso
+
+collect.res.engraft.lasso.coef %>%
+  filter(species %in% use.species.lasso) %>%
+  filter(var.type == "ex_ante.combined") %>%
+  filter(resp.var %in% c("oc.rec_turnover", "oc.donor_takeover")) %>%
+  filter(coef.nonzero > 0.1) %>%
+  filter(!grepl("abd_pre", term) & !grepl("abd_donor", term)) %>%
+  #filter(! term %in% unlist(v)) %>%
+  group_by(term) %>% tally() %>% arrange(desc(n))
+```
+
+```{r}
+v <- list()
+
+v[["technical"]] <- c(
+  #"min_depth",
+  "indication.rcdi",
+  "indication.mets",
+  "antibiotics.summary",
+  "fmt_route.nasal"
+  #"fmt_sample_prep.fresh"
+  #"bowel.prep.summary"
+)
+
+v[["community.tax"]] <- c(
+  "dissimilarity.donor_pre",
+  "richness.pre.scaled",
+  #"richness.donor.scaled"
+  "fr.pre.scaled"
+  #"fr.donor.scaled"
+)
+
+v[["community.metabolic"]] <- c(
+  "dist_gmm.donor_pre",
+  "butyrate_production.pre",
+  "butyrate_production.donor"
+  #"proteolysis.pre",
+  #"proteolysis.donor"
+  #"saccharolysis.pre",
+  #"saccharolysis.donor"
+)
+
+collect.res.engraft.lasso.coef %>%
+  filter(species %in% use.species.lasso) %>%
+  filter(var.type == "ex_ante.combined") %>%
+  filter(resp.var %in% c("oc.rec_turnover", "oc.donor_takeover")) -> tmp.res
+
+tmp.res %>%
+  filter(grepl("abd_pre", term)) %>%
+  #filter(coef.nonzero > 0.1) %>%
+  group_by(term) %>%
+  summarise(vip = sum(abs(coef.nonzero))) %>%
+  arrange(desc(vip)) %>%
+  mutate(mOTU = str_remove(term, "\\.abd_pre")) %>%
+  left_join(data.taxonomy.gtdb %>% select(mOTU, family, label), by = "mOTU") %>%
+  pull(term) %>% head(30) -> v[["abd.pre"]]
+
+tmp.res %>%
+  filter(grepl("abd_donor", term)) %>%
+  #filter(coef.nonzero > 0.1) %>%
+  group_by(term) %>%
+  summarise(vip = sum(abs(coef.nonzero))) %>%
+  arrange(desc(vip)) %>%
+  mutate(mOTU = str_remove(term, "\\.abd_donor")) %>%
+  left_join(data.taxonomy.gtdb %>% select(mOTU, family, label), by = "mOTU") %>%
+  pull(term) %>% head(10) -> v[["abd.donor"]]
+
+data.taxonomy.gtdb %>%
+  filter(mOTU %in% c(str_remove(v[["abd.pre"]], "\\.abd_pre"), str_remove(v[["abd.donor"]], "\\.abd_donor"))) %>% #group_by(order) %>% tally
+  mutate(
+    order = fct_relevel(order, c("Bacteroidales", "Coriobacteriales", "Enterobacterales", "Lactobacillales", "Oscillospirales", "Lachnospirales", "Peptostreptococcales")),
+    mOTU = fct_relevel(mOTU, c("ref_mOTU_v2_0898", "ref_mOTU_v2_0899"))
+  ) %>%
+  arrange(order, family, mOTU) %>% pull(label) %>% as.character() -> order.species.lasso_abd
+
+v[["focal.species"]] <- c(
+  "abd_ratio.donor_pre",
+  "allele_dist.donor_pre",
+  "allele_div.pre",
+  "allele_div.donor",
+  "phylo.complementarity"
+  #"ko.complementarity"
+)
+```
+
+Pre-set graph layouts.
+
+```{r}
+x.max <- 200
+x.increment <- 1
+
+node.size_min <- 1.5
+node.size_max <- 6
+```
+
+```{r}
+data.taxonomy.gtdb %>%
+  filter(mOTU %in% use.species.lasso) %>%
+  mutate(
+    taxonomy.summarised = case_when(
+      genus %in% c("Bacteroides", "Phocaeicola") ~ "Bacteroides sp.",
+      order == "Bacteroidales" ~ "other Bacteroidales",
+      phylum %in% c("Proteobacteria") ~ "other",
+      class %in% c("Bacilli", "Negativicutes") ~ "Bacilli_Negativicutes",
+      order %in% c("Actinomycetales", "Coriobacteriales") ~ "Actinobacteria",
+      grepl("Blauti", genus) ~ "Blautia sp.",
+      genus %in% c("Faecalibacterium") ~ "Faecalibacterium sp.",
+      family == "Oscillospiraceae" ~ "Oscillospiraceae sp.",
+      family %in% c("Lachnospiraceae", "Ruminococcaceae") ~ paste("other", as.character(family)),
+      class %in% c("Clostridia", "Clostridia_A") ~ "other Clostridia",
+      #order %in% c("Peptostreptococcales", "Monoglobales_A", "Christensenellales", "Oscillospirales", "Lachnospirales") ~ "other Clostridia",
+      TRUE ~ "other"
+    ),
+    taxonomy.summarised = fct_relevel(taxonomy.summarised, c(
+      "Bacteroides sp.",
+      "other Bacteroidales",
+      "Actinobacteria",
+      "Bacilli_Negativicutes",
+      "Oscillospiraceae sp.",
+      "Blautia sp.",
+      "other Lachnospiraceae",
+      "Faecalibacterium sp.",
+      "other Ruminococcaceae",
+      "other Clostridia",
+      "other"
+    )),
+    genus = fct_relevel(genus, "Phocaeicola")
+  ) %>%
+  arrange(taxonomy.summarised, family, genus) %>%
+  select(mOTU, label, taxonomy.summarised) %>%
+  #Add indices for layout
+  mutate(
+    x.pos = row_number() * ((x.max - 11) / length(use.species.lasso)) + ((as.numeric(taxonomy.summarised) - 1) * x.increment)
+  ) -> tmp.taxonomy
+
+tibble(term = unlist(v)) %>%
+  mutate(
+    type = case_when(
+      term %in% v[["technical"]] ~ "technical",
+      term %in% v[["community.tax"]] ~ "community.tax",
+      term %in% v[["community.metabolic"]] ~ "community.metabolic",
+      term %in% v[["abd.pre"]] ~ "abd.pre",
+      term %in% v[["abd.donor"]] ~ "abd.donor",
+      term %in% v[["focal.species"]] ~ "focal.species"
+    ),
+    type = fct_relevel(type, names(v)),
+    scope = case_when(
+      term %in% c(v[["abd.pre"]], "antibiotics.summary", "bowel.prep.summary", "richness.pre.scaled", "fr.pre.scaled", "butyrate_production.pre", "allele_div.pre") ~ "recipient",
+      grepl("indication", term) ~ "recipient",
+      term %in% c(v[["abd.donor"]], "fmt_route.nasal", "richness.donor.scaled", "butyrate_production.donor", "allele_div.donor") ~ "donor",
+      TRUE ~ "donor_rec"
+    )
+  ) %>%
+  mutate(
+    term_name = str_remove(string = str_remove(term, "\\.abd_donor"), "\\.abd_pre")
+  ) %>%
+  left_join(data.taxonomy.gtdb %>% select(mOTU, label), by = c("term_name" = "mOTU")) %>%
+  mutate(term_name = ifelse(!is.na(label), label, term_name)) %>%
+  select(-label) %>%
+  mutate(
+    term = fct_relevel(term, c(v[["technical"]], v[["community.tax"]], v[["community.metabolic"]], v[["abd.pre"]], v[["abd.donor"]], v[["focal.species"]])),
+    term_name = fct_relevel(term_name, c(v[["technical"]], v[["community.tax"]], v[["community.metabolic"]], order.species.lasso_abd, v[["focal.species"]]))
+  ) %>%
+  arrange(type, term_name) %>%
+  mutate(
+    x.pos = row_number() * ((x.max - (4 * 6)) / 55) + ((as.numeric(type) - 1) * x.increment * 4)
+  ) -> tmp.terms
+tmp.terms
+```
+
+### Donor takeover data
+
+```{r}
+require(tidygraph)
+require(ggraph)
+
+tmp.res %>%
+  filter(term %in% unlist(v)) %>%
+  filter(resp.var == "oc.donor_takeover") %>%
+  filter(coef.nonzero >= 0.1) %>%
+  select(-var.type) %>%
+  dplyr::mutate(
+    direction = ifelse(coef.mean < 0, "neg", "pos"),
+    coef = abs(coef.mean)
+  ) %>%
+  dplyr::transmute(
+    from = term,
+    to = species,
+    weight1 = coef,
+    weight2 = coef.nonzero,
+    edge.type = direction
+  ) %>%
+  arrange(from, to) %>%
+  as_tbl_graph(directed = T) %>%
+  activate(nodes) %>%
+  left_join(tmp.taxonomy %>% select(mOTU, label), by = c("name" = "mOTU")) %>%
+  left_join(tmp.terms %>% select(term, term_name, type, scope), by = c("name" = "term")) %>%
+  mutate(
+    category = case_when(
+      !is.na(type) ~ as.character(type),
+      !is.na(label) ~ "species"
+    ),
+    label = ifelse(is.na(label), as.character(term_name), label)
+  ) %>%
+  select(-term_name) %>%
+  mutate(
+    var.type = type,
+    type = name %in% use.species.lasso,
+    degree_out = centrality_degree(),
+    degree_in = centrality_degree(mode = "in"),
+    degree = pmax(degree_in, degree_out)
+  ) %>%
+  activate(edges) %>%
+  mutate(
+    var.type = .N()$var.type[from]
+  ) %>%
+  filter(weight1 > 0) -> tmp.graph.colonisation
+tmp.graph.colonisation %>% activate(nodes) %>% as_tibble() %>% arrange(var.type)
+```
+
+Manually layout the graph: colonisation network.
+
+```{r, fig.height=6, fig.width=8}
+#Create a fake layout first
+(layout <- create_layout(tmp.graph.colonisation, "bipartite"))
+
+#Manually re-layout
+layout %>%
+  left_join(tmp.taxonomy %>% select(mOTU, x.pos), by = c("name" = "mOTU")) %>%
+  mutate(x = ifelse(!is.na(x.pos), x.pos, x)) %>% select(-x.pos) %>%
+  left_join(tmp.terms %>% select(term, x.pos), by = c("name" = "term")) %>%
+  mutate(x = ifelse(!is.na(x.pos), x.pos, x)) %>% select(-x.pos) -> layout
+
+layout %>% arrange(x) %>% filter(category == "species")
+
+#Plot graph
+ggraph(tmp.graph.colonisation, x = layout$x, y = layout$y) +
+  geom_edge_diagonal(strength = 1, aes(colour = edge.type, alpha = ..index.., edge_width = weight1)) +
+  scale_edge_alpha('Edge direction', guide = 'edge_direction', range = c(0.05, 0.6)) +
+  scale_edge_width_continuous(range = c(0.5, 2.5)) +
+  #scale_edge_colour_distiller(palette = "PRGn", direction = 1) +
+  scale_edge_colour_manual(values = c("#c51b7d", "#7fbc41")) +
+  #geom_node_point(aes(size = degree, colour=scope), alpha = 1) +
+  geom_node_point(aes(fill=scope, size=degree), colour="#bdbdbd", shape=21, stroke = 0.2, alpha = 1) +
+  scale_size_continuous(range = c(node.size_min, node.size_max)) +
+  #scale_colour_brewer(palette = "Paired", direction = 1) +
+  scale_fill_manual(values = c(
+    PLOT$colour$outcome$engraft_consp,
+    "#238B45",
+    PLOT$colour$outcome$species_retained
+    ),
+    #na.value = PLOT$colour$outcome$engraft_novel
+    na.value = "#969696"
+  ) +
+  #facet_edges(~ var.type, ncol = 3) +
+  theme_graph(
+    #base_family = PLOT$font$base_family,
+    #base_size = PLOT$font$size.base
+  ) +
+  theme(
+    strip.text = element_blank(),
+    plot.margin = margin(r = 0, l = 0, t = 0, b = 0),
+    panel.spacing.x = unit(0.05, "cm"),
+    panel.spacing.y = unit(0.05, "cm"),
+    panel.background = element_blank(),
+    legend.position = "none"
+  ) -> p.graph_colonisation
+p.graph_colonisation
+
+p.graph_colonisation +
+  scale_size_continuous(range = c(0.5 * node.size_min, 0.5 * node.size_max)) +
+  scale_edge_width_continuous(range = c(0.25, 2)) +
+  facet_edges(~ var.type, ncol = 2) -> p.graph_colonisation.faceted
+p.graph_colonisation.faceted
+
+ggsave(p.graph_colonisation, filename = paste0(PARAM$folder.results, "engraftment.lasso_species.graph_colonisation.pdf"), width=18, height=3, useDingbats = F, units = "cm")
+ggsave(p.graph_colonisation.faceted, filename = paste0(PARAM$folder.results, "engraftment.lasso_species.graph_colonisation.faceted.pdf"), width=18, height=4.5, useDingbats = F, units = "cm")
+```
+
+### Turnover network
+
+Prepare graph data.
+
+```{r}
+require(tidygraph)
+require(ggraph)
+
+tmp.res %>%
+  filter(term %in% unlist(v)) %>%
+  filter(resp.var == "oc.rec_turnover") %>%
+  filter(coef.nonzero >= 0.1) %>%
+  select(-var.type) %>%
+  dplyr::mutate(
+    direction = ifelse(coef.mean < 0, "neg", "pos"),
+    coef = abs(coef.mean)
+  ) %>%
+  dplyr::transmute(
+    from = term,
+    to = species,
+    weight1 = coef,
+    weight2 = coef.nonzero,
+    edge.type = direction
+  ) %>%
+  arrange(from, to) %>%
+  as_tbl_graph(directed = T) %>%
+  activate(nodes) %>%
+  left_join(tmp.taxonomy %>% select(mOTU, label), by = c("name" = "mOTU")) %>%
+  left_join(tmp.terms %>% select(term, term_name, type, scope), by = c("name" = "term")) %>%
+  mutate(
+    category = case_when(
+      !is.na(type) ~ as.character(type),
+      !is.na(label) ~ "species"
+    ),
+    label = ifelse(is.na(label), as.character(term_name), label)
+  ) %>%
+  select(-term_name) %>%
+  mutate(
+    var.type = type,
+    type = name %in% use.species.lasso,
+    degree_out = centrality_degree(),
+    degree_in = centrality_degree(mode = "in"),
+    degree = pmax(degree_in, degree_out)
+  ) %>%
+  activate(edges) %>%
+  mutate(
+    var.type = .N()$var.type[from]
+  ) %>%
+  filter(weight1 > 0) -> tmp.graph.turnover
+tmp.graph.turnover
+```
+
+Manually layout the graph: colonisation network.
+
+```{r, fig.height=6, fig.width=8}
+#Create a fake layout first
+(layout <- create_layout(tmp.graph.turnover, "bipartite"))
+
+#Manually re-layout
+layout %>%
+  left_join(tmp.taxonomy %>% select(mOTU, x.pos), by = c("name" = "mOTU")) %>%
+  mutate(x = ifelse(!is.na(x.pos), x.pos, x)) %>% select(-x.pos) %>%
+  left_join(tmp.terms %>% select(term, x.pos), by = c("name" = "term")) %>%
+  mutate(x = ifelse(!is.na(x.pos), x.pos, x)) %>% select(-x.pos) -> layout
+
+#Plot graph
+ggraph(tmp.graph.turnover, x = layout$x, y = layout$y) +
+  geom_edge_diagonal(strength = 1, aes(colour = edge.type, alpha = ..index.., edge_width = weight1)) +
+  scale_edge_alpha('Edge direction', guide = 'edge_direction', range = c(0.05, 0.6)) +
+  scale_edge_width_continuous(range = c(0.5, 2.5)) +
+  #scale_edge_colour_distiller(palette = "PRGn", direction = 1) +
+  scale_edge_colour_manual(values = c("#c51b7d", "#7fbc41")) +
+  #geom_node_point(aes(size = degree, colour=scope), alpha = 1) +
+  geom_node_point(aes(fill=scope, size=degree), colour="#bdbdbd", shape=21, stroke = 0.2, alpha = 1) +
+  scale_size_continuous(range = c(node.size_min, node.size_max)) +
+  #scale_colour_brewer(palette = "Paired", direction = 1) +
+  scale_fill_manual(values = c(
+    PLOT$colour$outcome$engraft_consp,
+    "#238B45",
+    PLOT$colour$outcome$species_retained
+    ),
+    na.value = PLOT$colour$outcome$influx_novel
+  ) +
+  #facet_edges(~ var.type, ncol = 3) +
+  theme_graph(
+    #base_family = PLOT$font$base_family,
+    #base_size = PLOT$font$size.base
+  ) +
+  theme(
+    strip.text = element_blank(),
+    plot.margin = margin(r = 0, l = 0, t = 0, b = 0),
+    panel.spacing.x = unit(0.05, "cm"),
+    panel.spacing.y = unit(0.05, "cm"),
+    panel.background = element_blank(),
+    legend.position = "none"
+  ) -> p.graph_turnover
+p.graph_turnover
+
+p.graph_turnover +
+  scale_size_continuous(range = c(0.5 * node.size_min, 0.5 * node.size_max)) +
+  scale_edge_width_continuous(range = c(0.25, 2)) +
+  facet_edges(~ var.type, ncol = 2) -> p.graph_turnover.faceted
+p.graph_turnover.faceted
+
+ggsave(p.graph_turnover, filename = paste0(PARAM$folder.results, "engraftment.lasso_species.graph_turnover.pdf"), width=18, height=3, useDingbats = F, units = "cm")
+ggsave(p.graph_turnover.faceted, filename = paste0(PARAM$folder.results, "engraftment.lasso_species.graph_turnover.faceted.pdf"), width=18, height=4.5, useDingbats = F, units = "cm")
+```
+
+
+
+----
+
+

@@ -1,0 +1,112 @@
+---
+title: 'Analysis: Prepare Allele Distance Data'
+author: "Sebastian Schmidt"
+date: "2020-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(stringsAsFactors = FALSE)
+```
+
+## Prepare Environment
+
+```{r Load Libraries, echo=F}
+library("tidyverse", warn.conflicts=F, quietly=T)
+```
+
+Set file names and basic parameters.
+
+```{r Set Parameters}
+#Preallocate global data structures
+PARAM <- list()
+
+#Set relevant folder names
+PARAM$folder.Rmd <- paste0(getwd(), "/")
+PARAM$folder.base <- gsub("Rmd/", "", PARAM$folder.Rmd)
+PARAM$folder.data <- paste0(PARAM$folder.base, "data/")
+PARAM$folder.results <- paste0(PARAM$folder.base, "results/")
+
+#Sample data
+PARAM$file.sample <- paste0(PARAM$folder.data, "data.sample.RData")
+#Count table data
+PARAM$file.mOTU <- paste0(PARAM$folder.data, "data.mOTU.RData")
+#Count table and beta div data
+PARAM$file.beta_div <- paste0(PARAM$folder.data, "data.beta_div.Rdata")
+#Per-genome data
+PARAM$file.data_genome <- paste0(PARAM$folder.data, "genome_data.combined.Rdata")
+PARAM$file.data_genome_sets <- paste0(PARAM$folder.data, "data.genome_sets.Rdata")
+```
+
+Load data.
+
+```{r}
+load(PARAM$file.sample)
+load(PARAM$file.mOTU)
+load(PARAM$file.data_genome)
+load(PARAM$file.data_genome_sets)
+```
+
+## Parse and Process Data
+
+Load data on SNV-based quantification of engraftment/rejection patterns and on shuffled background comparisons.
+
+```{r}
+#Get all results files for per-species SNV-based transmission quantification
+files.allele_dist <- list.files(path=paste0(PARAM$folder.results, "allele.dist"), pattern=".RData", full.names = T, recursive = F)
+
+#Preallocate
+tmp.allele_dist <- list()
+
+#Loop through species and load data
+for (f in files.allele_dist) {
+  load(f)
+  
+  #Extract current mOTU ID
+  str_replace(pattern = ".+\\/", replacement = "", string = f) %>% str_replace("\\.RData", "") %>% str_replace(".+\\.", "") -> curr.motu
+  
+  writeLines(paste(date(), "=>", curr.motu))
+  
+  #Append to existing data structure
+  class(dat.allele_dist$shared_cov) <- "integer"
+  class(dat.allele_dist$diff_abs) <- "numeric"
+  class(dat.allele_dist$dist) <- "numeric"
+  tmp.allele_dist[[f]] <- dat.allele_dist %>% filter(shared_cov > 20)
+}
+
+#Put everything together
+dat.allele_distance <- bind_rows(tmp.allele_dist)
+```
+
+Filter down to only within-FMT comparisons.
+
+```{r}
+data.sample %>%
+  dplyr::select(sample_alias, fmt.id) %>%
+  separate_rows(fmt.id, sep = ",") -> map.sample_to_fmt
+
+dat.allele_distance %>%
+  dplyr::select(-diff_abs) %>%
+  left_join(map.sample_to_fmt, by = c("sample_1" = "sample_alias")) %>% dplyr::rename(fmt_1 = fmt.id) %>%
+  left_join(map.sample_to_fmt, by = c("sample_2" = "sample_alias")) %>% dplyr::rename(fmt_2 = fmt.id) %>%
+  filter(fmt_1 == fmt_2) %>%
+  dplyr::select(-fmt_2) %>% dplyr::rename(fmt.id = fmt_1) -> dat.allele_distance.fmt
+```
+
+Store.
+
+```{r}
+save(dat.allele_distance.fmt, file = paste0(PARAM$folder.data, "data.allele_distances.FMT.Rdata"))
+save(dat.allele_distance, file = paste0(PARAM$folder.data, "data.allele_distances.full.Rdata"))
+```
+
+
+----
+
+
+
+
+
+
+

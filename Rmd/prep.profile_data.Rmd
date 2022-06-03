@@ -1,0 +1,695 @@
+---
+title: "Prepare Profile Data"
+author: "Sebastian Schmidt"
+date: "2/19/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+options(stringsAsFactors = FALSE)
+options(dplyr.summarise.inform = FALSE)
+```
+
+## Introduction
+
+This script parses and pre-formats data for the `FMT_META` project. Specifically, the following steps are performed:
+
+* load sample metadata, format to match sample names
+* amend sample metadata to identify individual FMT sets per study (i.e., match donor and recipient samples) and store that information as `data.fmt`
+* load `mOTU` profiles for all samples in the study, pre-filter the table to include only relevant taxa
+* load `mOTU` phylogenies (per each COG)
+* calculate per-sample `mOTU`-based alpha div and between-samples beta div for all samples
+
+## Prepare Environment
+
+Load libraries, set parameters, etc.
+
+```{r, echo=F}
+# Load Packages
+library("plyr", warn.conflicts=F, quietly=T)
+library("dplyr", warn.conflicts=F, quietly=T)
+library("readxl", warn.conflicts=F, quietly=T)
+library("stringr", warn.conflicts=F, quietly=T)
+library("ape", warn.conflicts=F, quietly=T)
+library("tidyverse", warn.conflicts=F, quietly=T)
+
+#Source convenience functions
+source("https://raw.githubusercontent.com/defleury/Toolbox_16S/master/R/function.alpha_diversity.R")
+source("https://raw.githubusercontent.com/defleury/Toolbox_16S/master/R/function.rarefaction.R")
+source("https://raw.githubusercontent.com/defleury/Schmidt_et_al_2016_community_similarity/master/functions.community_similarity.R")
+
+#Make R behave marginally less moronic
+options(stringsAsFactors = FALSE)
+```
+
+```{r}
+#Preallocate global data structures
+PARAM <- list();
+
+#Set relevant folder names
+PARAM$folder.Rmd <- paste0(getwd(), "/")
+PARAM$folder.base <- gsub("Rmd/", "", PARAM$folder.Rmd)
+PARAM$folder.data <- paste0(PARAM$folder.base, "data/")
+PARAM$folder.freezer <- "/g/scb2/bork/mocat/freezer/"
+PARAM$folder.mOTU_tax <- "/g/scb2/bork/mocat/software/motus2/2.0.1/db_mOTU/"
+PARAM$folder.mOTU_tax <- paste0(PARAM$folder.base, "data/motus-v2/")
+
+#Set parameters
+#Minimum number of samples required to meet above criteria
+PARAM$thresh.taxa.min_samples <- 0.05
+#Minimum mOTU abundance
+PARAM$thresh.mOTU.min_abd <- 10^-6
+#Minimum mOTU total abundance per sample
+PARAM$thresh.sample.min_specI_abd <- 100
+
+PARAM$use.cores <- 4
+```
+
+## Load & Process Sample Data
+
+Define a set of samples to be dropped from the analysis entirely due to upstream problems.
+
+```{r}
+drop.samples <- c(
+  "EBS_DON_009-11-0-0",
+  "EBS_DON_012-11-0-0",
+  "EBS_DON_013-11-0-0",
+  "SAMN15803919",
+  "SAMN15803954",
+  "SAMN15803975",
+  "SAMN15803949",
+  "SAMN15803950",
+  "SAMN15803951",
+  "FMT_Smillie_FMT4",
+  "FMT_Smillie_FMT12",
+  "FMT_Smillie_FMT17",
+  "FMT_Smillie_FMT19",
+  "FMT_Smillie_FMT25",
+  "FMT_Smillie_FMT98",
+  "SAMN06018976",
+  "Leo_2020_FMT_ESBL.sample_RGNO_NEC1",
+  "Leo_2020_FMT_ESBL.sample_RGNO_NEC2",
+  "Leo_2020_FMT_ESBL.sample_RGNO_NEC3",
+  "Leo_2020_FMT_ESBL.sample_RGNO_NEC4",
+  "Leo_2020_FMT_ESBL.sample_RGNO_NEC5",
+  "Leo_2020_FMT_ESBL.sample_RGNO_NEC6",
+  "Leo_2020_FMT_ESBL.sample_RGNO_NEC7",
+  "Leo_2020_FMT_ESBL.sample_RGNO_NECconc"
+)
+```
+
+Load sample metadata.
+
+```{r}
+file.metadata <- paste0(PARAM$folder.base, "metadata/FMT_META.metadata.all.xlsx")
+
+data.sample <- as.data.frame(read_excel(file.metadata))
+```
+
+Load experiment metadata.
+
+```{r}
+#Iterate through per-study exp metadata files
+dat.exp <- data.frame()
+for (f in c(
+  "FMT_AU-experiment_upload.tsv",
+  "FMT_Damman.experiment_data.tsv",
+  "FMT_FAME.experiment_data.tsv",
+  "FMT_FATLOSE1-experiment_upload.tsv",
+  "FMT_FATLOSE2-experiment_upload.tsv",
+  "FMT_Kumar.experiment_metadata.metalog.tsv",
+  "fmt_moss2017_metaDB_experiment.tsv",
+  "FMT_Nusbaum.experiment_data.tsv",
+  "FMT_Smillie_experiment.tsv",
+  "FMT_TURN-experiment_upload.tsv",
+  "FMT_Vaughn.experiment_metadata.tsv",
+  "Lee2016_FMT.expdata.tsv",
+  "Aggarwala_2020_FMT_RCDI.experiments.tsv",
+  "Baruch_2021_FMT_antiPD1.experiments.tsv",
+  "BarYoseph_2020_FMT.experiment_data.tsv",
+  "Davar_2021_FMT_antiPD1.experiments.tsv",
+  "Goll_2020_FMT_IBS.experiment_data.tsv",
+  "Goloshchapov_2019_FMT.experiment_data.tsv",
+  "Ianiro_2020_FMT_renal_carcinoma.experiments.tsv",
+  "Koopen_2021_FMT_metabolic_syndrome_diet.experiments.tsv",
+  "Leo_2020_FMT_ESBL.experiment_data.tsv",
+  "Podlesny_2020_FMT_RCDI.experiment_data.tsv",
+  "Watson_2021_FMT_RCDI.experiment_data.tsv",
+  "Zhao_2020_FMT_Tourette.experiment_data.tsv"
+)) {
+  #Read current experiments file
+  file.exp <- paste0(PARAM$folder.base, "metadata/", f)
+  curr.exp <- read.delim(file.exp, comment.char = "#", sep = "\t")
+  
+  if (f == "FMT_FAME.experiment_data.tsv") {curr.exp$sample_alias <- gsub("-22-", "-11-", curr.exp$experiment_name)}
+  if (f == "FMT_FATLOSE2-experiment_upload.tsv") {curr.exp$sample_alias <- gsub("-11-", "-22-", curr.exp$sample_alias)}
+  #if (f == "fmt_moss2017_metaDB_experiment.tsv") {curr.exp$sample_alias <- curr.exp$ena_accession}
+  
+  #Get total base depth
+  if ("read_depth" %in% colnames(curr.exp)) {curr.exp$read_count <- curr.exp$read_depth}
+  curr.exp$base_count <- as.numeric(curr.exp$read_length) * as.numeric(curr.exp$read_count)
+  
+  curr.exp %>% group_by(sample_alias) %>% summarise(read_count=sum(read_count), read_length=mean(read_length), base_count=sum(base_count)) %>% as.data.frame() -> curr.exp
+  
+  dat.exp <- rbind(dat.exp, curr.exp)
+}
+
+#Clean sample aliases
+dat.exp$sample_alias <- gsub("FMT_Kumar.", "", dat.exp$sample_alias)
+
+#Add read depths and seq depths to sample table
+data.sample %>%
+  #Drop problematic samples
+  filter(!sample_alias %in% drop.samples) %>%
+  #Add exp data
+  left_join(dat.exp, by="sample_alias") %>%
+  #Replace sample_alias with ena ID where necessary.
+  mutate(
+    sample_alias = ifelse(study %in% c(
+      "FMT_Smilie",
+      "FMT_Moss",
+      "FMT_Nusbaum",
+      "FMT_Lee",
+      "FMT_Damman",
+      "Aggarwala_2020_FMT_RCDI",
+      "Baruch_2021_FMT_antiPD1",
+      "BarYoseph_2020_FMT",
+      "Davar_2021_FMT_antiPD1",
+      "Goll_2020_FMT_IBS",
+      "Goloshchapov_2019_FMT",
+      "Ianiro_2020_FMT_renal_carcinoma",
+      "Koopen_2021_FMT_metabolic_syndrome_diet",
+      "Leo_2020_FMT_ESBL",
+      "Podlesny_2020_FMT_RCDI",
+      "Watson_2021_FMT_RCDI",
+      "Zhao_2020_FMT_Tourette"
+    ), ena_ers_sample_id, sample_alias)
+  ) -> data.sample
+
+#Manually add missing base count for one FMT_Smillie sample
+data.sample$base_count[data.sample$sample_alias == "SAMEA104393700"] <- 16797280453
+```
+
+Further cosmetics on `data.sample`.
+
+```{r}
+data.sample %>%
+  #Define timepoint bins
+  mutate(
+    timepoint.bin = case_when(
+      timepoint.fmt %in% -29:-28 ~ "pre.4w",
+      timepoint.fmt %in% -24:-21 ~ "pre.3w",
+      timepoint.fmt %in% -14:-11 ~ "pre.2w",
+      timepoint.fmt %in% -9:-7 ~ "pre.1w",
+      timepoint.fmt %in% -2:0 ~ "pre.FMT",
+      timepoint.fmt %in% 1:9 ~ "1w",
+      timepoint.fmt %in% 11:17 ~ "2w",
+      timepoint.fmt %in% 18:24 ~ "3w",
+      timepoint.fmt %in% 25:45 ~ "1mo",
+      timepoint.fmt %in% 46:74 ~ "2mo",
+      timepoint.fmt %in% 75:105 ~ "3mo",
+      timepoint.fmt %in% 106:200 ~ "4_6mo",
+      TRUE ~ "6mo+"
+    ),
+    timepoint.bin = factor(timepoint.bin, levels = c(
+      "pre.4w", "pre.3w", "pre.2w", "pre.1w",
+      "pre.FMT",
+      "1w", "2w", "3w", "1mo", "2mo", "3mo", "4_6mo", "6mo+"
+    ))
+  ) %>%
+  #Fix "HT,CDI" disease status
+  mutate(
+    subject_disease_status = case_when(
+      subject_disease_status %in% c("HCT,CDI", "CDI") ~ "RCDI",
+      subject_disease_status == "UC,CDI" ~ "UC,RCDI",
+      subject_disease_status %in% c("IBD", "UC") ~ "UC",
+      subject_disease_status == "CD" ~ "CD",
+      subject_disease_status %in% c("metabolic syndrome", "MS") ~ "MetS",
+      subject_disease_status == "TS" ~ "TOU",
+      subject_disease_status == "melanoma" ~ "MEL",
+      subject_disease_status == "metastatic renal cell carcinoma" ~ "REN",
+      TRUE ~ subject_disease_status
+    ),
+    subject_disease_status = factor(subject_disease_status, levels = c(
+      "CTR", "COHORT",
+      "MetS",
+      "ABXR",
+      "RCDI",
+      "UC,RCDI",
+      "UC", "CD",
+      "IBS",
+      "MEL", "REN",
+      "TOU"
+    ))
+  ) -> data.sample
+```
+
+
+
+Load metadata per each FMT time series.
+
+```{r}
+file.fmt_metadata <- paste0(PARAM$folder.base, "metadata/FMT_META.metadata.per_FMT.xlsx")
+
+data.fmt <- read_excel(file.fmt_metadata) %>%
+  #Fix antibiotics annotation
+  mutate(
+    vancomycin = ifelse(is.na(vancomycin), FALSE, vancomycin),
+    fidaxomycin = ifelse(is.na(fidaxomycin), FALSE, fidaxomycin),
+    colistin = ifelse(is.na(colistin), FALSE, colistin),
+    neomycin = ifelse(is.na(neomycin), FALSE, neomycin),
+    other_abx = ifelse(is.na(other_abx), FALSE, other_abx),
+    antibiotics.summary = vancomycin | fidaxomycin | colistin | neomycin | other_abx
+  ) %>%
+  #Add summary columns
+  mutate(
+    #Add column to summarise bowel prep
+    bowel.prep.summary = case_when(
+      bowel.prep == "none"  ~ FALSE,
+      is.na(bowel.prep) ~ NA,
+      TRUE ~ TRUE
+    ),
+    #Add summary of clinical success
+    clinical.response.summary = case_when(
+      clinical.response %in% c("relapse", "non-responder") ~ "non-responder",
+      clinical.response %in% c("responder", "sustained remission", "abxr.clear", "c_diff.clear") ~ "responder",
+      TRUE ~ as.character(NA)
+    ),
+    #Reorder and relabel studies
+    study.full = recode(
+      study,
+      FATLOSE = "MetS_NL_1",
+      Koopen_2021_FMT_metabolic_syndrome_diet = "MetS_NL_Koopen",
+      FAME = "ABXR_NL",
+      Leo_2020_FMT_ESBL = "ABXR_div_Leo",
+      BarYoseph_2020_FMT = "ABXR_IS_BarYoseph",
+      FMT_AU = "div_AU",
+      FMT_Smilie = "RCDI_US_Smillie",
+      Aggarwala_2020_FMT_RCDI = "RCDI_US_Aggarwala",
+      Watson_2021_FMT_RCDI = "RCDI_US_Watson",
+      Podlesny_2020_FMT_RCDI = "RCDI_US_Podlesny",
+      FMT_Moss = "RCDI_US_Moss",
+      TURN = "UC_NL",
+      FMT_Damman = "UC_US_Damman",
+      FMT_Nusbaum = "UC_US_Nusbaum",
+      FMT_Lee = "UC_US_Lee",
+      FMT_Vaughn = "CD_US_Vaughn",
+      Goll_2020_FMT_IBS = "IBS_NO_Goll",
+      Baruch_2021_FMT_antiPD1 = "MEL_IS_Baruch",
+      Davar_2021_FMT_antiPD1 = "MEL_US_Davar",
+      Ianiro_2020_FMT_renal_carcinoma = "REN_IT_Ianiro",
+      Zhao_2020_FMT_Tourette = "TOU_CN_Zhao",
+      Goloshchapov_2019_FMT = "CTR_RU_Goloshchapov"
+  )) %>%
+  mutate(
+    study.full = fct_relevel(
+      study.full,
+      "MetS_NL_1",
+      "MetS_NL_Koopen",
+      "ABXR_NL",
+      "ABXR_div_Leo",
+      "ABXR_IS_BarYoseph",
+      "RCDI_US_Smillie",
+      "RCDI_US_Aggarwala",
+      "RCDI_US_Watson",
+      "RCDI_US_Podlesny",
+      "RCDI_US_Moss",
+      "div_AU",
+      "UC_NL",
+      "UC_US_Damman",
+      "UC_US_Nusbaum",
+      "UC_US_Lee",
+      "CD_US_Vaughn",
+      "IBS_NO_Goll",
+      "MEL_IS_Baruch",
+      "MEL_US_Davar",
+      "REN_IT_Ianiro",
+      "TOU_CN_Zhao",
+      "CTR_RU_Goloshchapov"
+    )
+  ) %>%
+  mutate(
+    indication = factor(indication, levels = c(
+      "healthy_volunteer",
+      "metabolic_syndrome",
+      "antibiotics_resistance",
+      "recurrent_c_diff",
+      "ulcerative_colitis",
+      "morbus_crohn",
+      "irritable_bowel_syndrome",
+      "melanoma",
+      "renal_carcinoma",
+      "tourette_syndrome"
+    ))
+  ) %>%
+  #Add recipient age, sex & bmi
+  left_join(data.sample %>% select(subject_id, age_years, sex, bmi) %>% top_n(1), by = c("subject.recipient" = "subject_id")) %>%
+  left_join(data.sample %>% select(subject_id, age_years, sex, bmi) %>% top_n(1), by = c("subject.donor" = "subject_id"), suffix = c(".recipient", ".donor"))
+```
+
+## Load & Process Taxa Abundance Data
+
+Load mOTU table for first batch of studies (combined processing).
+
+```{r}
+file.mOTU <- paste0(PARAM$folder.base, "data/motus-v2/all_samples.motusv2.insertcount.tsv")
+
+tmp.mOTU <- read.delim(file.mOTU, sep="\t", comment.char = "#", header=T, row.names = 1)
+
+#Fix column names to match sample names in data.sample
+my.colnames <- colnames(tmp.mOTU)
+my.colnames <- gsub("\\.", "-", my.colnames)
+colnames(tmp.mOTU) <- my.colnames
+
+#Fix taxa names
+my.rownames <- rownames(tmp.mOTU)
+my.rownames[my.rownames == "-1"] <- "unclassified"
+my.rownames <- gsub(".+\\[", "", my.rownames)
+my.rownames <- gsub("\\]", "", my.rownames)
+rownames(tmp.mOTU) <- my.rownames
+```
+
+Load mOTU tables for newer studies (stored individually).
+
+```{r}
+#Define convenience function to process row names
+fix.mOTU.rownames <- function(tab) {
+  my.rownames <- rownames(tab)
+  my.rownames[my.rownames == "-1"] <- "unclassified"
+  my.rownames <- gsub(".+\\[", "", my.rownames)
+  my.rownames <- gsub("\\]", "", my.rownames)
+  rownames(tab) <- my.rownames
+  tab <- tab[rownames(tmp.mOTU), ]
+  tab
+}
+
+mOTU.MetS_NL_Koopen <- read.delim(paste0(PARAM$folder.base, "data/motus-v2/Koopen_2021_FMT_metabolic_syndrome_diet.motusv2.mg2.insertcount.tsv"), sep="\t", comment.char = "#", header=T, row.names = 1) %>% fix.mOTU.rownames()
+mOTU.ABXR_div_Leo <- read.delim(paste0(PARAM$folder.base, "data/motus-v2/Leo_2020_FMT_ESBL.motusv2.mg2.insertcount.tsv"), sep="\t", comment.char = "#", header=T, row.names = 1) %>% fix.mOTU.rownames()
+mOTU.ABXR_IS_BarYoseph <- read.delim(paste0(PARAM$folder.base, "data/motus-v2/BarYoseph_2020_FMT.motusv2.mg2.insertcount.tsv"), sep="\t", comment.char = "#", header=T, row.names = 1) %>% fix.mOTU.rownames()
+mOTU.RCDI_US_Aggarwala <- read.delim(paste0(PARAM$folder.base, "data/motus-v2/Aggarwala_2020_FMT_RCDI.motusv2.mg2.insertcount.tsv"), sep="\t", comment.char = "#", header=T, row.names = 1) %>% fix.mOTU.rownames()
+mOTU.RCDI_US_Watson <- read.delim(paste0(PARAM$folder.base, "data/motus-v2/Watson_2021_FMT_RCDI.motusv2.mg2.insertcount.tsv"), sep="\t", comment.char = "#", header=T, row.names = 1) %>% fix.mOTU.rownames()
+mOTU.RCDI_US_Podlesny <- read.delim(paste0(PARAM$folder.base, "data/motus-v2/Podlesny_2020_FMT_RCDI.motusv2.mg2.insertcount.tsv"), sep="\t", comment.char = "#", header=T, row.names = 1) %>% fix.mOTU.rownames()
+mOTU.IBS_NO_Goll <- read.delim(paste0(PARAM$folder.base, "data/motus-v2/Goll_2020_FMT_IBS.motusv2.mg2.insertcount.tsv"), sep="\t", comment.char = "#", header=T, row.names = 1) %>% fix.mOTU.rownames()
+mOTU.MEL_IS_Baruch <- read.delim(paste0(PARAM$folder.base, "data/motus-v2/Baruch_2021_FMT_antiPD1.motusv2.mg2.insertcount.tsv"), sep="\t", comment.char = "#", header=T, row.names = 1) %>% fix.mOTU.rownames()
+mOTU.MEL_US_Davar <- read.delim(paste0(PARAM$folder.base, "data/motus-v2/Davar_2021_FMT_antiPD1.motusv2.mg2.insertcount.tsv"), sep="\t", comment.char = "#", header=T, row.names = 1) %>% fix.mOTU.rownames()
+mOTU.RenC_IT_Ianiro <- read.delim(paste0(PARAM$folder.base, "data/motus-v2/Ianiro_2020_FMT_renal_carcinoma.motusv2.mg2.insertcount.tsv"), sep="\t", comment.char = "#", header=T, row.names = 1) %>% fix.mOTU.rownames()
+mOTU.TOU_CN_Zhao <- read.delim(paste0(PARAM$folder.base, "data/motus-v2/Zhao_2020_FMT_Tourette.motusv2.mg2.insertcount.tsv"), sep="\t", comment.char = "#", header=T, row.names = 1) %>% fix.mOTU.rownames()
+mOTU.CTR_RU_Goloshchapov <- read.delim(paste0(PARAM$folder.base, "data/motus-v2/Goloshchapov_2019_FMT.motusv2.mg2.insertcount.tsv"), sep="\t", comment.char = "#", header=T, row.names = 1) %>% fix.mOTU.rownames()
+```
+
+
+Filter mOTU table to only include taxa present at relative abundance ≥`r PARAM$thresh.mOTU.min_abd` in ≥`r round(100 * PARAM$thresh.taxa.min_samples, digits=0)`% of samples (i.e., `r round(PARAM$thresh.taxa.min_samples * nrow(data.sample), digits=0)`).
+
+```{r}
+mOTU.raw <- cbind(
+  tmp.mOTU,
+  mOTU.MetS_NL_Koopen,
+  mOTU.ABXR_div_Leo,
+  mOTU.ABXR_IS_BarYoseph,
+  mOTU.RCDI_US_Aggarwala,
+  mOTU.RCDI_US_Watson,
+  mOTU.RCDI_US_Podlesny,
+  mOTU.IBS_NO_Goll,
+  mOTU.MEL_IS_Baruch,
+  mOTU.MEL_US_Davar,
+  mOTU.RenC_IT_Ianiro,
+  mOTU.TOU_CN_Zhao,
+  mOTU.CTR_RU_Goloshchapov
+)
+
+mOTU.raw <- mOTU.raw[, data.sample$sample_alias[data.sample$sample_alias %in% colnames(mOTU.raw)]]
+mOTU.raw.rel <- t(t(mOTU.raw) / colSums(mOTU.raw))
+#mOTU.tmp <- tmp.mOTU[, data.sample$sample_alias[data.sample$sample_alias %in% colnames(tmp.mOTU)]]
+#mOTU.tmp.rel <- t(t(mOTU.tmp) / colSums(mOTU.tmp))
+
+#Apply filters
+#data.mOTU <- mOTU.raw[rowSums(mOTU.raw.rel > PARAM$thresh.mOTU.min_abd, na.rm=T) > (PARAM$thresh.taxa.min_samples * nrow(data.sample)), ]
+data.mOTU <- mOTU.raw[rowSums(mOTU.raw.rel > PARAM$thresh.mOTU.min_abd, na.rm=T) > 50, ]
+data.mOTU.rel <- mOTU.raw.rel[rownames(data.mOTU), ]
+#data.mOTU.tmp <- mOTU.tmp[rowSums(mOTU.tmp.rel > PARAM$thresh.mOTU.min_abd, na.rm=T) > (PARAM$thresh.taxa.min_samples * 537), ]
+#data.mOTU.rel <- mOTU.raw.rel[rownames(data.mOTU), ]
+
+#Remove "unclassified" fraction from abundance tables
+data.mOTU <- data.mOTU[rownames(data.mOTU) != "unclassified", ]
+data.mOTU.rel <- data.mOTU.rel[rownames(data.mOTU.rel) != "unclassified", ]
+```
+
+Add taxonomic information for `ref_mOTU`s and `meta_mOTU`s.
+
+```{r}
+#Reference specI taxonomy
+file.tax.ref <- paste0(PARAM$folder.mOTU_tax, "prok-refdb-v11.0.0_specI-v2_taxonomy_v1.map")
+tax.raw.ref <- read.delim(file.tax.ref, header=T, sep="\t")
+colnames(tax.raw.ref)[2] <- "mOTU.ID"
+
+#meta_mOTU taxonomy
+file.tax.meta <- paste0(PARAM$folder.mOTU_tax, "mOTULG.taxonomy")
+tax.raw.meta <- read.delim(file.tax.meta, header=T, sep="\t")
+colnames(tax.raw.meta)[1] <- "mOTU.ID"
+
+#Concatenate
+tax.raw <- rbind(tax.raw.ref[, 2:ncol(tax.raw.ref)], tax.raw.meta)
+tax.raw <- tax.raw[tax.raw[,1] != "not_profilable", ]
+rownames(tax.raw) <- tax.raw[,1]
+colnames(tax.raw)[8] <- "species"
+
+#Extract relevant labels for current tax table
+data.taxonomy <- tax.raw[rownames(data.mOTU), ]
+```
+
+Harmonise mOTU & ANI cluster taxonomies.
+
+```{r}
+file.data_genome <- paste0(PARAM$folder.data, "genome_data.combined.Rdata")
+load(file.data_genome)
+
+file.data_genome_sets <- paste0(PARAM$folder.data, "data.genome_sets.Rdata")
+load(file.data_genome_sets)
+
+#Load specI & mOTU taxonomy
+tax.ref <- read_delim(paste0(PARAM$folder.data, "motus-v2/prok-refdb-v11.0.0_specI-v2_taxonomy_v1.map"), "\t") %>%
+  mutate(species = mOTU, mOTU = `ref-mOTU_v2_ID`) %>%
+  select(-`ref-mOTU_v2_ID`, -specI_cluster)
+tax.meta <- read_delim(paste0(PARAM$folder.data, "motus-v2/mOTULG.taxonomy"), "\t") %>%
+  mutate_all(str_replace_all, "NA unknown .+", "") %>%
+  mutate(species = mOTU, mOTU = `meta-mOTU_v2_ID`) %>%
+  select(-`meta-mOTU_v2_ID`)
+
+#Extract taxonomy and median genome size for ref genomes
+data.genome %>%
+  filter(genome.type == "prok-refdb-v11") %>%
+  select(mOTU, size.genome) %>%
+  group_by(mOTU) %>%
+  summarise(size.genome = round(median(size.genome))) %>%
+  filter(mOTU %in% genomes.all_fmt.per_species$mOTU) %>%
+  left_join(tax.ref) %>%
+  mutate_all(str_replace, pattern = "[0-9]+ ", replacement = "") -> data.taxonomy.ref
+
+#Extract taxonomy for genomes mapped to "reference" and "meta" mOTUs
+data.genome %>%
+  select(mOTU, size.genome) %>%
+  group_by(mOTU) %>%
+  summarise(size.genome = round(median(size.genome))) %>%
+  filter(mOTU %in% genomes.all_fmt.per_species$mOTU) %>%
+  inner_join(tax.meta) %>%
+  mutate_all(str_replace, pattern = "[0-9]+ ", replacement = "") -> data.taxonomy.motu
+
+#Extract consensus taxonomy for ANI clusters
+get_mode <- function(x) { ifelse(all(is.na(x) | x == ""), "", names(which.max(table(x)))) }
+data.genome %>%
+  select(kingdom, phylum, class, order, family, genus, species, mOTU, cluster_95) %>%
+  mutate(mOTU = cluster_95) %>%
+  select(-cluster_95) %>%
+  filter(mOTU %in% genomes.all_fmt.per_species$mOTU & !mOTU %in% c(data.taxonomy.motu$mOTU, data.taxonomy.ref$mOTU)) %>%
+  na_if("") %>%
+  group_by(mOTU) %>%
+  dplyr::summarise(
+    kingdom = get_mode(kingdom),
+    phylum = get_mode(phylum),
+    class = get_mode(class),
+    order = get_mode(order),
+    family = get_mode(family),
+    genus = get_mode(genus),
+    species = get_mode(species)
+  ) %>%
+  ungroup() %>%
+  left_join(data.genome %>% filter(representative_95) %>% mutate(mOTU = cluster_95) %>% select(mOTU, size.genome)) %>%
+  mutate_all(str_replace, pattern = "[0-9]+ ", replacement = "") -> data.taxonomy.ani
+
+#Merge both taxonomy sets
+bind_rows(data.taxonomy.ref, data.taxonomy.motu, data.taxonomy.ani) %>%
+  arrange(mOTU) %>%
+  mutate_all(str_remove, pattern="NA.+") %>%
+  mutate(label = str_c(kingdom, phylum, class, order, family, genus, species, sep=";")) %>%
+  mutate(label = str_remove(label, ";+$")) %>%
+  mutate(label = str_remove(label, ".+;")) %>%
+  mutate(label = str_replace(label, "^\\[", "")) %>%
+  mutate(label = str_remove(label, "\\[.+")) %>%
+  mutate(mOTU_short = str_remove(mOTU, "NI_AL_95_0")) %>%
+  mutate(mOTU_short = str_remove(mOTU_short, "ef_mOTU_v2_")) %>%
+  mutate(mOTU_short = str_remove(mOTU_short, "eta_mOTU_v2_")) %>%
+  mutate(label = str_c(label, " (", mOTU_short, ")")) -> data.taxonomy.full
+```
+
+## Load and Process Taxa Tree
+
+Load per-genome data on COG mapping and genome information.
+
+```{r}
+file.cog2genome <- paste0(PARAM$folder.data, "cogs2genomes.map")
+
+tmp.cog2genome <- read_tsv(file.cog2genome, col_names = c("gene", "cog", "genome")) %>%
+  mutate(gene = str_remove(gene, " .+"))
+tmp.cog2genome %>%
+  left_join(data.genome, by="genome") %>%
+  mutate(mOTU = ifelse(is.na(mOTU), cluster_95, mOTU)) %>%
+  filter(mOTU %in% genomes.all_fmt.per_species$mOTU) %>%
+  select(gene, cog, genome, mOTU) %>%
+  separate(gene, c("contig", "gene_no"), sep="_") -> dat.cog2genome 
+```
+
+Parse phylogenetic tree of species-level clusters, based on 10 marker genes.
+
+```{r, echo = F, warning = F}
+#Parse tree
+file.tree_raw <- paste0(PARAM$folder.data, "trees/fmt_ConcatenatedAllsubset_AllSpecies_v3.FAA_aln_concat.nwk")
+tree.raw <- read.tree(file.tree_raw)
+
+#Parse ID mapping for tree
+file.tree_mapping <- paste0(PARAM$folder.data, "trees/meta_mOTU_taxonomy__ANI_fr11_metamOTUs2_metdataForTree.tab")
+tree.map <- read_tsv(file.tree_mapping) %>%
+  select(mOTU2, `meta-mOTU_v2_ID`) %>%
+  rename(id_in_tree = mOTU2, id_in_motu = `meta-mOTU_v2_ID`)
+```
+
+Relabel all tips in the phylogeny, prune to relevant species, relabel again, then re-root at the base of Archaea.
+
+```{r}
+#Temporarily re-label tips
+tree.raw$tip.label <- tree.map$id_in_motu[match(tree.raw$tip.label, tree.map$id_in_tree)]
+
+#Drop species that are not used in our dataset
+tree.full <- drop.tip(tree.raw, tree.raw$tip.label[!tree.raw$tip.label %in% data.phenotype$mOTU])
+
+#Re-label tips to make them human-readable
+tree.full$tip.label <- data.phenotype$label[match(tree.full$tip.label, data.phenotype$mOTU)]
+
+#Root tree using Archaea as the outgroup
+tree.full <- root(tree.full, outgroup = data.phenotype %>% filter(kingdom == "Archaea") %>% pull(label), resolve.root = T)
+
+#Get a taxa ordering based on phylogeny
+tree.full <- ladderize(tree.full)
+order.label.tree <- tree.full$tip.label[tree.full$edge[tree.full$edge[,2] <= length(tree.full$tip.label), 2]]
+```
+
+Tidy up and export tree.
+
+```{r}
+write.tree(tree.full, file = paste0(PARAM$folder.data, "tree.species.full.nwk"))
+save(tree.full, data.tree, file = paste0(PARAM$folder.data, "data.tree.Rdata"))
+```
+
+## Calculate Diversities
+
+Calculate per-sample diversities (alpha diversity).
+
+```{r}
+#Calculate rarefied alpha diversities
+alpha.frame <- Hill_Diversity.rarefied(data.mOTU, size=1000, iterations=100, q.H=c(0, 1, 2))
+rownames(alpha.frame) <- as.character(alpha.frame$sample.name)
+
+#Append to sample data
+data.sample <- cbind(data.sample, alpha.frame[data.sample$sample_alias, ])
+```
+
+Calculate between-sample compositional overlap (beta diversity).
+
+```{r}
+#Calculate sample dissimilarities
+beta.div <- list();
+
+#Bray-Curtis
+beta.div[["Bray_Curtis"]] <- community.similarity.par(data.mOTU.rel, distance="bray_curtis", use.cores=PARAM$use.cores)
+
+#Jaccard
+beta.div[["Jaccard"]] <- community.similarity.par(data.mOTU.rel, distance="jaccard", use.cores=PARAM$use.cores)
+
+#Weighted Jaccard
+beta.div[["Jaccard_w"]] <- community.similarity.par(data.mOTU.rel, distance="jaccard.abd.frac", use.cores=PARAM$use.cores)
+
+#Get pairwise (raw) SparCC correlations and derived "interaction matrix"
+taxa.sparcc <- sparcc(data.mOTU.rel, size.thresh=0, pseudocount=10^-6, nblocks=4, use.cores=PARAM$use.cores)
+taxa.sparcc.S <- 0.5 * (cor(taxa.sparcc) + 1)
+
+#Unweighted TINA
+beta.div[["TINA_uw"]] <- community.similarity.corr.par(data.mOTU.rel, S=taxa.sparcc.S, distance="jaccard.corr.uw.norm", blocksize=10, use.cores=PARAM$use.cores)
+beta.div[["TINA_uw"]][beta.div[["TINA_uw"]] < 0] <- 0
+rownames(beta.div[["TINA_uw"]]) <- colnames(beta.div[["TINA_uw"]]) <- colnames(data.mOTU.rel)
+
+#Weighted TINA
+beta.div[["TINA_w"]] <- community.similarity.corr.par(data.mOTU.rel, S=taxa.sparcc.S, distance="jaccard.corr.w.norm", blocksize=10, use.cores=PARAM$use.cores)
+beta.div[["TINA_w"]][beta.div[["TINA_w"]] < 0] <- 0
+rownames(beta.div[["TINA_w"]]) <- colnames(beta.div[["TINA_w"]]) <- colnames(data.mOTU.rel)
+
+#Store in R format
+save(beta.div, file=paste0(PARAM$folder.data, "data.beta_div.RData"))
+save(taxa.sparcc, file=paste0(PARAM$folder.data, "data.sparcc.RData"))
+```
+
+Calculate functional diversity and redundancy.
+
+```{r}
+load( paste0(PARAM$folder.data, "data.gmgc.KO.Rdata"))
+
+#Function from
+#https://rdrr.io/github/HuntsmanCancerInstitute/hciR/src/R/as_matrix.R
+as_matrix <- function(x){
+   if(!tibble::is_tibble(x) ) stop("x must be a tibble")
+  y <- as.matrix.data.frame(x[,-1])
+  rownames(y) <- x[[1]]
+  y
+}
+
+#Turn KO data into matrix
+data.ko.gmgc %>%
+  select(-count_norm) %>%
+  pivot_wider(names_from = "sample_alias", values_from = "count", values_fill = 0) %>%
+  as_matrix() -> mat.ko
+
+#Calculate functional diversities
+fd.frame <- Hill_Diversity.rarefied(mat.ko, size=100000, iterations=5, q.H=c(0, 1, 2))
+rownames(fd.frame) <- as.character(fd.frame$sample.name)
+colnames(fd.frame)[2:4] <- c("fd.0", "fd.1", "fd.2")
+
+#Appennd to sample data
+data.sample <- cbind(data.sample, fd.frame[data.sample$sample_alias, 2:4])
+
+#Compuate functional redundancy
+data.sample %>%
+  dplyr::mutate(
+    fr.0 = fd.0 / q.0,
+    fr.1 = fd.1 / q.1,
+    fr.2 = fd.2 / q.2,
+    fr.ent = 1 - (1 / fr.2)
+  ) -> data.sample
+```
+
+
+
+## Store Metadata and Profiles
+
+```{r}
+save(data.sample, data.fmt, file = paste0(PARAM$folder.data, "data.sample.RData"))
+save(data.mOTU, data.mOTU.rel, data.taxonomy, data.taxonomy.full, file = paste0(PARAM$folder.data, "data.mOTU.RData"))
+```
+
+
+
+
+
+
+
+
+

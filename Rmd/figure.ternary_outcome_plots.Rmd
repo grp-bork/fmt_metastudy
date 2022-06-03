@@ -1,0 +1,296 @@
+---
+title: 'Figure: Ternary Plot on Outcomes'
+author: "Sebastian Schmidt"
+date: "2021-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+options(stringsAsFactors = FALSE)
+```
+
+## Prepare Environment
+
+```{r Load Libraries, echo=F, warning=FALSE}
+library("tidyverse", warn.conflicts=F, quietly=T)
+library("ggtern", warn.conflicts=F, quietly=T)
+```
+
+Set file names and basic parameters.
+
+```{r Set Parameters}
+#Preallocate global data structures
+PARAM <- list()
+
+#Set relevant folder names
+PARAM$folder.Rmd <- paste0(getwd(), "/")
+PARAM$folder.base <- gsub("Rmd/", "", PARAM$folder.Rmd)
+
+load(paste0(PARAM$folder.base, "data/param.analysis_transmission.Rdata"))
+```
+
+Load data.
+
+```{r}
+#load(PARAM$file.sample)
+load(PARAM$file.sample)
+load(PARAM$file.phenotype)
+load(PARAM$file.data_transmission)
+load(PARAM$file.data_transmission_bg)
+load(PARAM$file.data_transmission.scored)
+load(PARAM$file.data_transmission_bg.scored)
+load(PARAM$file.data_transmission.scored.consolidated)
+load(PARAM$file.mOTU)
+load(PARAM$file.mOTU.ANI)
+load(PARAM$file.tree)
+load(PARAM$file.beta_div)
+load(PARAM$file.allele_distances)
+load(PARAM$file.allele_diversity)
+load(PARAM$file.gmm_gmgc)
+load(PARAM$file.gmm_species)
+load(PARAM$file.sample)
+
+#LASSO results
+load(paste0(PARAM$folder.results, "results.engraftment.LASSO.Rdata"))
+#OLS regression results
+load(paste0(PARAM$folder.results, "results.engraftment.OLS.Rdata"))
+```
+
+Reset some parameters
+
+```{r}
+PLOT$point.size <- 0.5
+
+#Re-set outcome colours
+PLOT$colour$outcome$species_lost <- "#ffffb3"
+PLOT$colour$outcome$species_retained <- "#FFE206"
+PLOT$colour$outcome$rejection_consp <- "#FFFF33"
+PLOT$colour$outcome$coexist.rec <- "#FDBF6F"
+PLOT$colour$outcome$coexist.donor <- "#ff7f00"
+PLOT$colour$outcome$engraft_consp <- "#A6CEE3"
+PLOT$colour$outcome$engraft_novel <- "#1F78B4"
+PLOT$colour$outcome$influx_consp <- "#DE77AE"
+PLOT$colour$outcome$influx_novel <- "#C51B7D"
+PLOT$colour$outcome$rejection_novel <- "#DEEBF7"
+```
+
+## Conceptual Plot: Outcome Types
+
+Prepare "mock" data to outline outcome categories in ternary plot.
+
+```{r}
+dat.ternary <- tibble(
+  donor = c(
+    seq(0,1, by = 0.001),
+    seq(1,0, by = -0.001),
+    seq(0,1, by = 0.001),
+    seq(1,0, by = -0.001),
+    rep(0, times = 1001),
+    rep(0, times = 1001),
+    seq(0.5,1, by = 0.001),
+    seq(1,0.5, by = -0.001)
+  ),
+  pre = c(
+    seq(1,0, by = -0.001),
+    seq(0,1, by = 0.001),
+    rep(0, times = 1001),
+    rep(0, times = 1001),
+    seq(0,1, by = 0.001),
+    seq(1,0, by = -0.001),
+    seq(1,0.5, by = -0.001),
+    seq(0.5,1, by = 0.001)
+  ),
+  post = c(
+    rep(0, times = 1001),
+    rep(0, times = 1001),
+    seq(1,0, by = -0.001),
+    seq(0,1, by = 0.001),
+    seq(1,0, by = -0.001),
+    seq(0,1, by = 0.001),
+    rep(0.5, times = 501),
+    rep(0.5, times = 501)
+  )
+) %>%
+  dplyr::mutate(
+    outcome = case_when(
+      post > 0.5 ~ "novel strains",
+      post > donor ~ "novel strains",
+      post > pre ~ "novel strains",
+      pre >= 8*donor ~ "persistence",
+      donor >= 8*pre ~ "engraftment",
+      TRUE ~ "coexistence"
+    )
+  )
+
+dat.ternary <- bind_rows(
+  tibble(donor = 1, pre = 0, novel = 0, outcome = "colonisation (consp.)"),
+  tibble(donor = 0.5, pre = 0, novel = 0.5, outcome = "colonisation (consp.)"),
+  tibble(donor = 0.444, pre = 0.056, novel = 0.5, outcome = "colonisation (consp.)"),
+  tibble(donor = 0.888, pre = 0.112, novel = 0, outcome = "colonisation (consp.)"),
+  tibble(donor = 0.5, pre = 0, novel = 0.5, outcome = "novel strains (consp.)"),
+  tibble(donor = 0, pre = 0.5, novel = 0.5, outcome = "novel strains (consp.)"),
+  tibble(donor = 0, pre = 0, novel = 1, outcome = "novel strains (consp.)"),
+  tibble(donor = 0, pre = 1, novel = 0, outcome = "persistence (consp.)"),
+  tibble(donor = 0, pre = 0.5, novel = 0.5, outcome = "persistence (consp.)"),
+  tibble(donor = 0.056, pre = 0.444, novel = 0.5, outcome = "persistence (consp.)"),
+  tibble(donor = 0.112, pre = 0.888, novel = 0, outcome = "persistence (consp.)"),
+  tibble(donor = 0.444, pre = 0.056, novel = 0.5, outcome = "coexistence"),
+  tibble(donor = 0.056, pre = 0.444, novel = 0.5, outcome = "coexistence"),
+  tibble(donor = 0.112, pre = 0.888, novel = 0, outcome = "coexistence"),
+  tibble(donor = 0.888, pre = 0.112, novel = 0, outcome = "coexistence")
+)
+
+dat.transmission.scored
+
+```
+
+Plot.
+
+```{r, fig.width=4, fig.height=4}
+ggtern(dat.ternary, aes(x = pre, y = novel, z = donor)) +
+  geom_polygon(aes(fill = outcome), alpha = 0.6) +
+  scale_fill_manual(values = c(
+    PLOT$colour$outcome$coexist.rec,
+    PLOT$colour$outcome$engraftment_consp,
+    PLOT$colour$outcome$influx_novel,
+    PLOT$colour$outcome$species_retained
+  )) +
+  theme_minimal() -> p.ternary.concept
+p.ternary.concept
+
+ggsave(p.ternary.concept, filename = paste0(PARAM$folder.results, "ternary.concept.pdf"), width = 10, height = 8, useDingbats = F)
+```
+
+```{r, fig.width=12, fig.height=12}
+data.phenotype.gmm %>%
+  filter(mOTU %in% use.species.engraftment.gt_50) %>%
+  arrange(phylum, class, order, family, genus, species) %>%
+  pull(label) -> order.label.tax
+
+dat.transmission.scored %>%
+  filter(species %in% use.species.engraftment.gt_50) %>%
+  filter(!outcome %in% c("not observed", "autologous FMT", "species lost", "rejection novel", "engraftment novel", "influx novel", "species retained", "novel unclear")) %>%
+  transmute(
+    species = species,
+    outcome = outcome,
+    donor = donor.specific,
+    pre = recipient.specific,
+    novel = influx
+  ) %>%
+  left_join(data.phenotype.gmm %>% select(mOTU, label), by = c("species" = "mOTU")) %>%
+  mutate(
+    label = fct_relevel(label, order.label.tax),
+    outcome = case_when(
+      outcome == "engraftment conspecific" ~ "colonisation (consp.)",
+      outcome == "rejection conspecific" ~ "persistence (consp.)",
+      outcome == "influx conspecific" ~ "novel strains (consp.)",
+      TRUE ~ outcome
+    )
+  ) %>%
+  ggtern(aes(x = pre, y = novel, z = donor, colour = outcome)) +
+    geom_point(alpha = 0.6) +
+    scale_colour_manual(values = c(
+      PLOT$colour$outcome$coexist.rec,
+      PLOT$colour$outcome$engraftment_consp,
+      PLOT$colour$outcome$influx_novel,
+      PLOT$colour$outcome$species_retained
+    )) +
+    facet_wrap(. ~ label, labeller = label_wrap_gen(width = 15), nrow = 15) +
+    theme_minimal() +
+    theme(
+      axis.text=element_text(size=4),
+      axis.title=element_text(size=6),
+      strip.text = element_text(size=6),
+      legend.position = "bottom"
+    ) -> p.ternary.all
+
+ggsave(p.ternary.all, filename = paste0(PARAM$folder.results, "ternary.all_species.pdf"), width = 30, height = 25, useDingbats = F)
+```
+
+Re-plot, but for selected species only.
+
+```{r}
+#Define list and order of species to plot.
+species.ternary <- c(
+  #"ref_mOTU_v2_1073", #Bacteroides ovatus
+  "ref_mOTU_v2_0899", #Bacteroides uniformis
+  "ref_mOTU_v2_0898", #Bacteroides vulgatus
+  "ref_mOTU_v2_4448", #Prevotella copri
+  "ref_mOTU_v2_0466", #Blautia wexlerae
+  "ref_mOTU_v2_4203", #Dorea longicatena
+  "ref_mOTU_v2_1376", #Ruminococcus torques
+  "ref_mOTU_v2_1377", #Flavonifractor plautii
+  "ref_mOTU_v2_1379", #Faecalibacterium prausnitzii
+  "meta_mOTU_v2_6419", #Lawsonibacter asaccharolyticus
+  "ref_mOTU_v2_0219", #Streptococcus thermophilus
+  "ref_mOTU_v2_1042", #Veillonella parvula
+  "ref_mOTU_v2_2805", #Phascolarctobacterium faecium
+  "ref_mOTU_v2_1149", #Bilophila wadsworthia
+  "ref_mOTU_v2_0150", #Bifidobacterium longum
+  "ref_mOTU_v2_0642", #Eggerthella lenta
+  "ref_mOTU_v2_1301" #Akkermansia muciniphila
+)
+
+data.phenotype.gmm %>%
+  filter(mOTU %in% species.ternary) %>%
+  mutate(mOTU = fct_relevel(mOTU, species.ternary)) %>%
+  arrange(mOTU) %>%
+  pull(label) -> order.label.ternary_subset
+
+dat.transmission.scored %>%
+  filter(species %in% species.ternary) %>%
+  filter(!outcome %in% c("not observed", "autologous FMT", "species lost", "rejection novel", "engraftment novel", "influx novel", "species retained", "novel unclear")) %>%
+  transmute(
+    species = species,
+    outcome = outcome,
+    donor = donor.specific,
+    pre = recipient.specific,
+    novel = influx
+  ) %>%
+  left_join(data.phenotype.gmm %>% select(mOTU, label), by = c("species" = "mOTU")) %>%
+  mutate(
+    label = fct_relevel(label, order.label.ternary_subset),
+    outcome = case_when(
+      outcome == "engraftment conspecific" ~ "colonisation (consp.)",
+      outcome == "rejection conspecific" ~ "persistence (consp.)",
+      outcome == "influx conspecific" ~ "novel strains (consp.)",
+      TRUE ~ outcome
+    )
+  ) %>%
+  ggtern(aes(x = pre, y = novel, z = donor, colour = outcome)) +
+    geom_point(alpha = 0.4, size = 0.5) +
+    scale_colour_manual(values = c(
+      PLOT$colour$outcome$coexist.rec,
+      PLOT$colour$outcome$engraftment_consp,
+      PLOT$colour$outcome$influx_novel,
+      PLOT$colour$outcome$species_retained
+    )) +
+    facet_wrap(. ~ label, labeller = label_wrap_gen(width = 15), nrow = 2) +
+    theme_minimal() +
+    theme(
+      axis.text=element_text(size=0),
+      axis.title=element_text(size=0),
+      strip.text = element_blank(),
+      legend.position = "none"
+    ) -> p.ternary.subset
+p.ternary.subset
+
+ggsave(p.ternary.subset, filename = paste0(PARAM$folder.results, "ternary.subset.pdf"), width = 14.5, height = 4, units = "cm", useDingbats = F)
+```
+
+
+
+
+
+
+
+
+----
+
+
+
+
+
+

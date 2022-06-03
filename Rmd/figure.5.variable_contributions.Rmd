@@ -1,0 +1,344 @@
+---
+title: 'Figure: Variable Contributions'
+author: "Sebastian Schmidt"
+date: "2021-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+options(stringsAsFactors = FALSE)
+options(dplyr.summarise.inform = FALSE)
+```
+
+## Prepare Environment
+
+```{r Load Libraries, echo=F, warning=FALSE}
+library("tidyverse", warn.conflicts=F, quietly=T)
+```
+
+Set file names and basic parameters.
+
+```{r Set Parameters}
+#Preallocate global data structures
+PARAM <- list()
+
+#Set relevant folder names
+PARAM$folder.Rmd <- paste0(getwd(), "/")
+PARAM$folder.base <- gsub("Rmd/", "", PARAM$folder.Rmd)
+
+load(paste0(PARAM$folder.base, "data/param.analysis_transmission.Rdata"))
+```
+
+Load data.
+
+```{r}
+#load(PARAM$file.sample)
+load(PARAM$file.sample)
+load(PARAM$file.phenotype)
+load(PARAM$file.data_transmission)
+load(PARAM$file.data_transmission.scored)
+load(PARAM$file.data_transmission.scored.consolidated)
+load(PARAM$file.mOTU)
+load(PARAM$file.mOTU.ANI)
+load(PARAM$file.tree)
+load(PARAM$file.beta_div)
+load(PARAM$file.allele_distances)
+load(PARAM$file.allele_diversity)
+load(PARAM$file.gmm_gmgc)
+load(PARAM$file.gmm_species)
+load(PARAM$file.sample)
+
+#LASSO results
+load(paste0(PARAM$folder.results, "results.engraftment.LASSO.Rdata"))
+#OLS regression results
+load(paste0(PARAM$folder.results, "results.engraftment.OLS.Rdata"))
+```
+
+Reset some parameters
+
+```{r}
+PLOT$point.size <- 0.5
+
+#Re-set outcome colours
+PLOT$colour$outcome$species_lost <- "#ffffb3"
+PLOT$colour$outcome$species_retained <- "#FFE206"
+PLOT$colour$outcome$rejection_consp <- "#FFFF33"
+PLOT$colour$outcome$coexist.rec <- "#FDBF6F"
+PLOT$colour$outcome$coexist.donor <- "#ff7f00"
+PLOT$colour$outcome$engraft_consp <- "#A6CEE3"
+PLOT$colour$outcome$engraft_novel <- "#1F78B4"
+PLOT$colour$outcome$influx_consp <- "#DE77AE"
+PLOT$colour$outcome$influx_novel <- "#C51B7D"
+PLOT$colour$outcome$rejection_novel <- "#DEEBF7"
+```
+
+## Dot plot of variable contributions
+
+Re-format data to get per-variable predictive value. Use this formula:
+
+`rel.vip = vip * (AUC - 0.5) / 0.5`
+
+```{r}
+collect.res.engraft.lasso.metric %>%
+  #Filter by relevance
+  filter(resp.var %in% c("oc.rec_resilience", "oc.donor_takeover", "oc.rec_turnover")) %>%
+  filter(var.type != "ex_ante.combined" & !str_detect(var.type, "post_hoc")) %>%
+  #filter(var.type == "ex_ante.combined") %>%
+  #Sort out AUCs
+  group_by(species, resp.var, var.type) %>%
+  dplyr::summarise(auc = mean(avg)) %>%
+  group_by(resp.var, var.type) %>%
+  dplyr::mutate(n.species = n()) %>%
+  #Add per-term coefficient data
+  left_join(collect.res.engraft.lasso.coef, by = c("species", "resp.var", "var.type")) %>%
+  dplyr::mutate(
+    term = case_when(
+      var.type == "ex_ante.abd_donor.facilitation" & str_detect(term, species) ~ "focal_species.abd_donor",
+      var.type == "ex_ante.abd_pre.facilitation" & str_detect(term, species) ~ "focal_species.abd_pre",
+      var.type == "ex_ante.abd_donor.exclusion" & str_detect(term, species) ~ "focal_species.abd_donor",
+      var.type == "ex_ante.abd_pre.exclusion" & str_detect(term, species) ~ "focal_species.abd_pre",
+      TRUE ~ term
+    ),
+  ) %>%
+  group_by(species, resp.var, var.type, term, auc, n.species) %>%
+  dplyr::summarise(
+    vip = mean(coef.nonzero, na.rm=T)
+  ) %>%
+  ungroup() %>%
+  dplyr::mutate(
+    auc = ifelse(auc < 0.5, 0.5, auc),
+    auc.scaled = (auc - 0.5) / 0.5
+  ) %>%
+  filter(!var.type %in% c("ex_ante.abd_pre", "ex_ante.abd_donor")) %>%
+  dplyr::mutate(
+    term = case_when(
+      str_detect(var.type, "\\.facilitation") ~ str_c(term, ".facilitation"),
+      str_detect(var.type, "\\.exclusion") ~ str_c(term, ".exclusion"),
+      TRUE ~ term
+    )
+  ) %>%
+  #Compute scores
+  group_by(resp.var, var.type, term) %>%
+  dplyr::summarise(
+    vip.mu = sum(vip / n.species, na.rm = T),
+    auc.scaled.mu = sum(auc.scaled / n.species, na.rm = T),
+    score = sum(vip / n.species, na.rm=T) * sum(auc.scaled / n.species, na.rm=T)
+  ) %>%
+  ungroup() -> collect.res.engraft.lasso.scores
+
+#Add summarised scores for exclusion and facilitation
+collect.res.engraft.lasso.metric %>%
+  #Filter by relevance
+  filter(resp.var %in% c("oc.rec_resilience", "oc.donor_takeover", "oc.rec_turnover")) %>%
+  filter(str_detect(var.type, "facilitation") | str_detect(var.type, "exclusion")) %>%
+  #Sort out AUCs
+  group_by(species, resp.var, var.type) %>%
+  dplyr::summarise(auc = mean(avg)) %>%
+  group_by(resp.var, var.type) %>%
+  dplyr::mutate(
+    n.species = n(),
+    auc.scaled = pmax(0, (auc - 0.5) / 0.5)
+  ) %>%
+  dplyr::summarise(
+    score = sum(auc.scaled / n.species)
+  ) %>%
+  ungroup() %>%
+  dplyr::mutate(
+    term = str_c(var.type, ".combined")
+  ) -> tmp.scores
+
+#Process data for plotting
+collect.res.engraft.lasso.scores %>%
+  #arrange(desc(score))
+  #filter(str_detect(var.type, "facilitation")) %>% arrange(desc(score))
+  #filter(var.type == "ex_ante.focal_species") %>% pull(term) %>% table
+  dplyr::select(resp.var, var.type, term, score) %>%
+  bind_rows(tmp.scores) %>%
+  # dplyr::mutate(
+  #   var.type = case_when(
+  #     term %in% c("fmt_sample_prep.fresh", "fmt_route.nasal", "bowel.prep.summary") ~ "technical",
+  #     term %in% c("indication.rcdi", "indication.ibd", "indication.mets") ~ "indication",
+  #   )
+  # ) %>%
+  dplyr::mutate(
+    rec = 1,
+    complement = 1,
+    donor = 1,
+    propagule_pressure = case_when(
+      term %in% c("fmt_sample_prep.fresh", "fmt_route.nasal", "abd_ratio.donor_pre", "focal_species.abd_donor.exclusion", "focal_species.abd_donor.facilitation", "ex_ante.technical.combined", "ex_ante.focal_species.combined") ~ 1,
+      TRUE ~ 0
+    ),
+    native_sp_abundance = case_when(
+      term %in% c("bowel.prep.summary", "antibiotics.summary", "abd_ratio.donor_pre", "focal_species.abd_pre.exclusion", "focal_species.abd_pre.facilitation", "ex_ante.technical.combined", "ex_ante.focal_species.combined") ~ 1,
+      TRUE ~ 0
+    ),
+    community_state = ifelse(var.type %in% c("ex_ante.community.tax", "ex_ante.community.metabolic"), 1, 0),
+    degree_disturbance = ifelse(grepl("indication", term) | term %in% c("bowel.prep.summary", "antibiotics.summary", "richness.pre.scaled", "fr.pre.scaled", "ex_ante.technical.combined", "ex_ante.community.tax.combined"), 1, 0),
+    genetic_diversity = ifelse(term %in% c("allele_dist.donor_pre", "allele_div.donor", "allele_div.pre", "ex_ante.focal_species.combined"), 1, 0),
+    facilitation = case_when(
+      term %in% c("focal_species.abd_pre.facilitation", "focal_species.abd_donor.facilitation") ~ 0,
+      str_detect(var.type, "facilitation") ~ 1,
+      TRUE ~ 0
+    ),
+    exclusion = case_when(
+      term %in% c("focal_species.abd_pre.exclusion", "focal_species.abd_donor.exclusion") ~ 0,
+      str_detect(var.type, "exclusion") ~ 1,
+      TRUE ~ 0
+    ),
+    limiting_similarity = ifelse(term %in% c("allele_dist.donor_pre", "phylo.complementarity", "ko.complementarity", "ex_ante.focal_species.combined"), 1, 0),
+    niche_effects = ifelse(term %in% c("butyrate_production.pre", "mucin_degradation.pre", "ko.complementarity", "ex_ante.community.metabolic.combined", "ex_ante.focal_species.combined"), 1, 0)
+  ) %>%
+  pivot_longer(rec:niche_effects, names_to = "mechanism") %>%
+  dplyr::mutate(
+    mechanism = fct_relevel(mechanism, levels = c("rec", "complement", "donor", "propagule_pressure", "native_sp_abundance", "community_state", "degree_disturbance", "genetic_diversity", "exclusion", "facilitation", "limiting_similarity", "niche_effects"))
+  ) %>%
+  filter(value == 1) -> collect.res.engraft.lasso.mechanism
+```
+
+Filter to relevant variables.
+
+```{r, fig.width = 6, fig.height = 4}
+collect.res.engraft.lasso.mechanism %>% #group_by(var.type) %>% tally()
+   filter(var.type == "ex_ante.focal_species" & resp.var == "oc.donor_takeover") %>%
+   group_by(term) %>% dplyr::summarise(score = mean(score)) %>% arrange(desc(score))
+```
+
+```{r}
+use.vars <- c(
+  #Technical, indication
+  "fmt_sample_prep.fresh",
+  "fmt_route.nasal",
+  "antibiotics.summary",
+  "bowel.prep.summary",
+  "indication.rcdi",
+  "indication.ibd",
+  #microbiome, community tax
+  "dissimilarity.donor_pre",
+  "richness.pre.scaled",
+  "richness.donor.scaled",
+  "fr.pre.scaled",
+  "fr.donor.scaled",
+  #microbiome, community metabolic
+  "dist_gmm.donor_pre",
+  "butyrate_production.pre",
+  "butyrate_production.donor",
+  "mucin_degradation.pre",
+  "mucin_degradation.donor",
+  #exclusion interactions
+  "focal_species.abd_pre.exclusion",
+  "ref_mOTU_v2_0899.abd_pre.exclusion",
+  "ref_mOTU_v2_0898.abd_pre.exclusion",
+  "ref_mOTU_v2_4873.abd_pre.exclusion",
+  "meta_mOTU_v2_6631.abd_pre.exclusion",
+  "focal_species.abd_donor.exclusion",
+  "ref_mOTU_v2_0898.abd_donor.exclusion",
+  "ref_mOTU_v2_4720.abd_donor.exclusion",
+  "ref_mOTU_v2_1378.abd_donor.exclusion",
+  #facilitation interactions
+  "focal_species.abd_pre.facilitation",
+  "ref_mOTU_v2_0036.abd_pre.facilitation",
+  "ref_mOTU_v2_0561.abd_pre.facilitation",
+  "focal_species.abd_donor.facilitation",
+  "meta_mOTU_v2_6548.abd_donor.facilitation",
+  "ref_mOTU_v2_0182.abd_donor.facilitation",
+  "ref_mOTU_v2_0458.abd_donor.facilitation",
+  #focal speces variables
+  "phylo.complementarity", "ko.complementarity",
+  "abd_ratio.donor_pre", "allele_dist.donor_pre", "allele_div.pre", "allele_div.donor"
+)
+
+collect.res.engraft.lasso.mechanism %>%
+  filter(term %in% c(use.vars)) %>%
+  dplyr::mutate(term = fct_relevel(term, use.vars)) %>%
+  dplyr::mutate(
+    scope = case_when(
+      term %in% c("fmt_sample_prep.fresh", "fmt_route.nasal") ~ "donor",
+      term %in% c("bowel.prep.summary", "indication.rcdi", "indication.ibd", "indication.mets") ~ "rec",
+      term %in% c("ko.complementarity", "phylo.complementarity") ~ "complement",
+      str_detect(term, "donor_pre") ~ "complement",
+      str_detect(term, "[\\._]donor") ~ "donor",
+      str_detect(term, "[\\._]pre") ~ "rec",
+      str_detect(term, "\\.combined") ~ "other"
+    ),
+    mechanism = fct_relevel(mechanism, rev(levels(mechanism))),
+    resp.var = fct_relevel(resp.var, c("oc.rec_turnover", "oc.donor_takeover", "oc.rec_resilience")),
+    var.type = fct_relevel(var.type, c("ex_ante.technical", "ex_ante.community.tax", "ex_ante.community.metabolic", "ex_ante.abd_pre.exclusion", "ex_ante.abd_donor.exclusion", "ex_ante.abd_pre.facilitation", "ex_ante.abd_donor.facilitation", "ex_ante.focal_species")),
+    score = case_when(
+      #mechanism %in% c("rec", "complement", "donor") ~ 0.01,
+      mechanism %in% c("rec", "complement", "donor", "other") ~ pmax(10^-4, score),
+      TRUE ~ pmax(10^-4, score)
+    )
+  ) %>%
+  filter(!(mechanism %in% c("rec", "complement", "donor") & mechanism != scope)) %>%
+  filter(resp.var == "oc.donor_takeover") -> dat.plot
+```
+
+Generate bubble plot.
+
+```{r, fig.width=6, fig.height=4}
+dat.plot %>%
+  ggplot(aes(x = term, y = mechanism, size = score, colour = scope)) +
+    geom_line(aes(group = term), size = 0.3, linetype = "dashed", colour = "grey") +
+    geom_point() +
+    scale_colour_manual(values = c("#238b45", PLOT$colour$outcome$engraft_novel, PLOT$colour$outcome$species_retained)) +
+    scale_x_discrete(position = "top") +
+    scale_size_continuous(trans = "sqrt", range = c(0.5, 8)) +
+    facet_grid(. ~ var.type, scale = "free_x", space = "free_x") +
+    theme_minimal() +
+    theme(
+      panel.grid = element_blank(),
+      axis.title = element_blank(),
+      #axis.text.x = element_text(angle = 45, vjust = 1, hjust = 0),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      strip.text = element_blank(),
+      legend.position = "none"
+    ) -> p.mechanism.bubble
+p.mechanism.bubble
+
+ggsave(p.mechanism.bubble, filename = paste0(PARAM$folder.results, "variable_contribution.bubble.pdf"), width=13, height=13, useDingbats = F, units = "cm")
+```
+
+Generate marginal plot.
+
+```{r, fig.width=2, fig.height=4}
+dat.plot %>%
+  ggplot(aes(x = score, y = mechanism, size = score, colour = scope)) +
+    geom_point(alpha = 0.6) +
+    scale_colour_manual(values = c("#238b45", PLOT$colour$outcome$engraft_novel, PLOT$colour$outcome$species_retained)) +
+    scale_size_continuous(trans = "sqrt", range = c(0.5, 8)) +
+    theme_minimal() +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_blank(),
+      axis.title = element_blank(),
+      axis.text = element_blank(),
+      legend.position = "none"
+    ) -> p.mechanism.margin
+p.mechanism.margin
+```
+
+Stitch plots together.
+
+```{r, fig.width=6, fig.height=6}
+library(cowplot)
+
+plot_grid(
+  p.mechanism.bubble,
+  p.mechanism.margin,
+  align = "h",
+  axis = "lbt",
+  ncol = 2,
+  rel_widths = c(6,1)
+) -> p.combined
+
+ggsave(p.combined, filename = paste0(PARAM$folder.results, "variable_contribution.pdf"), width=15, height=13, useDingbats = F, units = "cm")
+```
+
+
+
+
+---
+
